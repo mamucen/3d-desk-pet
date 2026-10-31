@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>信息管家 · 个人知识与待办中枢</title>
+  <meta name="description" content="记录零散想法、资料与待办，自动分类、摘要与关联，支持关键词检索、智能问答与阶段复盘。" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232f6b57'/%3E%3Cpath d='M20 22h24M20 32h18M20 42h12' stroke='%23fff' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- 启动引导 -->
+  <div id="boot" class="boot">
+    <div class="boot-mark" aria-hidden="true">
+      <span></span><span></span><span></span>
+    </div>
+    <p class="boot-text" id="bootText">正在整理你的空间…</p>
+  </div>
+
+  <!-- 登录 -->
+  <div id="auth" class="auth hidden">
+    <div class="auth-brand">
+      <div class="auth-brand-inner">
+        <div class="brand-mark big" aria-hidden="true">
+          <svg viewBox="0 0 40 40" fill="none">
+            <rect x="6" y="8" width="28" height="6" rx="3" fill="currentColor" opacity=".95"/>
+            <rect x="6" y="18" width="20" height="6" rx="3" fill="currentColor" opacity=".7"/>
+            <rect x="6" y="28" width="13" height="6" rx="3" fill="currentColor" opacity=".45"/>
+          </svg>
+        </div>
+        <h1 class="auth-title">信息管家</h1>
+        <p class="auth-tagline">把零散的想法、资料和待办交给它。<br />它替你分类、串联，并定期复盘。</p>
+        <ul class="auth-feats">
+          <li>
+            <span class="feat-dot"></span>
+            <div><b>随手记，自动归类</b><em>一句话也能收下，AI 判断类型、领域与要点</em></div>
+          </li>
+          <li>
+            <span class="feat-dot"></span>
+            <div><b>自动关联旧内容</b><em>新记录进来时，它会找出与之相通的笔记</em></div>
+          </li>
+          <li>
+            <span class="feat-dot"></span>
+            <div><b>问答与阶段复盘</b><em>基于你自己的记录回答，并给出下一步行动</em></div>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="auth-panel">
+      <div class="auth-card">
+        <h2 class="auth-card-title">欢迎回来</h2>
+        <p class="auth-card-sub">登录后，你的记录会安全地保存在云端。</p>
+
+        <div class="auth-tabs" id="authTabs" role="tablist">
+          <button class="auth-tab is-active" data-method="phone" role="tab">手机号登录</button>
+          <button class="auth-tab" data-method="wechat" role="tab">微信登录</button>
+        </div>
+
+        <form id="phoneForm" class="auth-form" novalidate>
+          <label class="field">
+            <span class="field-label">手机号</span>
+            <input id="phone" type="tel" inputmode="numeric" maxlength="11" autocomplete="tel" placeholder="请输入 11 位手机号" />
+            <small class="field-error" id="phoneError"></small>
+          </label>
+          <label class="field">
+            <span class="field-label">验证码</span>
+            <div class="code-row">
+              <input id="code" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6 位验证码" />
+              <button id="sendCode" class="btn ghost code-btn" type="button">获取验证码</button>
+            </div>
+          </label>
+          <button id="loginBtn" class="btn primary block" type="submit">登录 / 注册</button>
+          <p class="auth-note">未注册的手机号将自动创建账号</p>
+          <p class="auth-error" id="authError"></p>
+        </form>
+
+        <div id="wechatPane" class="auth-form hidden">
+          <button id="wechatBtn" class="btn wechat block" type="button">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+              <path d="M8.7 3C4.9 3 1.8 5.6 1.8 8.8c0 1.8 1 3.4 2.6 4.5l-.6 2 2.3-1.2c.8.2 1.6.3 2.4.3h.5a5 5 0 0 1-.2-1.4c0-3 2.9-5.4 6.5-5.4h.6C15.3 4.9 12.4 3 8.7 3Zm-2.3 3.5a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Zm4.7 0a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Z"/>
+              <path d="M22.2 13.1c0-2.7-2.6-4.9-5.8-4.9s-5.8 2.2-5.8 4.9 2.6 4.9 5.8 4.9c.7 0 1.4-.1 2-.3l1.9 1-.5-1.7c1.5-.9 2.4-2.3 2.4-3.9Zm-7.7-1.4a.8.8 0 1 1 0-1.5.8.8 0 0 1 0 1.5Zm3.9 0a.8.8 0 1 1 0-1.5.8.8 0 0 1 0 1.5Z"/>
+            </svg>
+            使用微信登录
+          </button>
+          <p class="auth-note">在微信内可直接授权；在浏览器中会打开授权页或二维码。</p>
+          <p class="auth-error" id="wechatError"></p>
+        </div>
+
+        <p class="auth-foot">登录即表示同意仅将内容用于你自己的知识库</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 主应用 -->
+  <div id="app" class="shell hidden">
+    <aside class="side" id="side">
+      <div class="side-brand">
+        <div class="brand-mark small" aria-hidden="true">
+          <svg viewBox="0 0 40 40" fill="none">
+            <rect x="6" y="8" width="28" height="6" rx="3" fill="currentColor" opacity=".95"/>
+            <rect x="6" y="18" width="20" height="6" rx="3" fill="currentColor" opacity=".7"/>
+            <rect x="6" y="28" width="13" height="6" rx="3" fill="currentColor" opacity=".45"/>
+          </svg>
+        </div>
+        <div class="side-brand-text">
+          <strong>信息管家</strong>
+          <small>Personal Keeper</small>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-item is-active" data-view="inbox">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13l2.4-7A2 2 0 0 1 7.3 4.7h9.4a2 2 0 0 1 1.9 1.3L21 13v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4Z"/><path d="M3 13h5l1 2h6l1-2h5"/></svg>
+          <span>收件箱</span>
+        </button>
+        <button class="nav-item" data-view="todo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.2l2.3 2.3 4.7-4.8"/></svg>
+          <span>待办</span>
+          <em class="nav-count" id="todoCount"></em>
+        </button>
+        <button class="nav-item" data-view="ask">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12.5c0 3.6-3.6 6.5-8 6.5a9.6 9.6 0 0 1-2.6-.35L5 20.5l1.1-3.2A6.2 6.2 0 0 1 4 12.5C4 8.9 7.6 6 12 6s8 2.9 8 6.5Z"/></svg>
+          <span>智能问答</span>
+        </button>
+        <button class="nav-item" data-view="insights">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18V9M9.5 18V5M15 18v-6M20 18v-9"/></svg>
+          <span>阶段洞察</span>
+        </button>
+      </nav>
+
+      <div class="side-foot">
+        <div class="user">
+          <div class="avatar" id="avatar">我</div>
+          <div class="user-meta">
+            <strong id="userName">已登录</strong>
+            <small id="userSub">云端同步</small>
+          </div>
+        </div>
+        <button class="btn tiny ghost" id="signOut" type="button">退出</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="菜单">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+          <input id="search" type="search" placeholder="搜索记录：关键词、标签、内容…" autocomplete="off" />
+          <button class="search-clear hidden" id="searchClear" type="button" aria-label="清空">×</button>
+        </div>
+        <div class="top-actions">
+          <span class="sync-state" id="syncState">已同步</span>
+        </div>
+      </header>
+      <section id="view" class="view"></section>
+    </main>
+  </div>
+
+  <!-- 详情抽屉 -->
+  <div id="drawer" class="drawer hidden" aria-hidden="true">
+    <div class="drawer-mask" data-close="1"></div>
+    <div class="drawer-panel" id="drawerPanel" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <noscript><div class="noscript">请启用 JavaScript 后使用信息管家。</div></noscript>
+
+  <!-- 官方云服务 SDK（IIFE 构建，已随应用内置，避免依赖外部 CDN） -->
+  <script src="vendor/workbuddy-cloud-sdk.js" onerror="window.__sdkLoadError=true"></script>
+  <script>
+    // 内置副本缺失时回退到 CDN
+    if (!window.WorkBuddyCloud) {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js"><\/script>');
+    }
+  </script>
+  <script src="js/config.js"></script>
+  <script src="js/cloud.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/db.js"></script>
+  <script src="js/ai.js"></script>
+  <script src="js/pet-bridge.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

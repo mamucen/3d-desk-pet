@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>随手记一条</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    user-select: none;
+  }
+  .bar {
+    position: absolute;
+    left: 6px; right: 6px; top: 4px; bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px;
+    border-radius: 14px;
+    background: rgba(24, 27, 26, .96);
+    border: 1px solid rgba(120, 235, 180, .28);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .42), inset 0 1px 0 rgba(255, 255, 255, .06);
+    transition: border-color .18s ease, box-shadow .18s ease;
+  }
+  .bar.ok {
+    border-color: rgba(90, 230, 160, .85);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .42), 0 0 0 3px rgba(82, 224, 164, .18);
+  }
+  .bar.err { border-color: rgba(255, 120, 90, .8); }
+
+  .mark {
+    flex: none;
+    width: 22px; height: 22px;
+    border-radius: 7px;
+    display: grid; place-items: center;
+    background: rgba(82, 224, 164, .14);
+    color: #7df0c0;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .bar.ok .mark { background: rgba(82, 224, 164, .26); }
+  .bar.err .mark { background: rgba(255, 120, 90, .18); color: #ff9c7e; }
+
+  .mid { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+
+  input {
+    width: 100%;
+    border: 0; outline: 0; background: transparent;
+    color: #f2f7f4;
+    font-size: 15px;
+    line-height: 20px;
+    font-family: inherit;
+    padding: 0;
+  }
+  input::placeholder { color: #6f7b75; }
+
+  .hint {
+    font-size: 11px;
+    line-height: 13px;
+    color: #6f8079;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hint b { color: #8ee8bf; font-weight: 600; }
+  .bar.err .hint { color: #ff9c7e; }
+
+  .key {
+    flex: none;
+    font-size: 11px;
+    color: #7d8a84;
+    border: 1px solid rgba(255, 255, 255, .14);
+    border-radius: 5px;
+    padding: 1px 5px;
+    line-height: 14px;
+  }
+  .bar.ok .key { display: none; }
+</style>
+</head>
+<body>
+  <div class="bar" id="bar">
+    <div class="mark" id="mark">✎</div>
+    <div class="mid">
+      <input id="text" type="text" maxlength="2000" placeholder="随手记一条，回车存进信息管家…" autocomplete="off" spellcheck="false">
+      <div class="hint" id="hint">回车存档 · Esc 取消</div>
+    </div>
+    <div class="key">⏎</div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  var bar = document.getElementById('bar');
+  var input = document.getElementById('text');
+  var hint = document.getElementById('hint');
+  var mark = document.getElementById('mark');
+  var busy = false;
+
+  function baseHint() {
+    return '回车存档 · Esc 取消';
+  }
+
+  window.QN.onFill(function (p) {
+    busy = false;
+    bar.className = 'bar';
+    mark.textContent = '✎';
+    input.value = p.text || '';
+    input.placeholder = '随手记一条，回车存进信息管家…';
+    var h = p.hint ? (p.hint + ' · ') : '';
+    var q = Number(p.count || 0);
+    hint.innerHTML = h + '回车存档 · Esc 取消' + (q ? ' · <b>攒着 ' + q + ' 条待同步</b>' : '');
+    setTimeout(function () { input.focus(); input.select(); }, 10);
+  });
+
+  window.QN.onOk(function (p) {
+    busy = true;
+    bar.className = 'bar ok';
+    mark.textContent = '✓';
+    input.value = '';
+    hint.innerHTML = p.sent ? '已送进管家的收件箱' : ('已记下，等管家打开就同步' + (p.queued ? '（' + p.queued + ' 条）' : ''));
+    setTimeout(function () { window.QN.hide(); }, 520);
+  });
+
+  window.QN.onError(function (msg) {
+    bar.className = 'bar err';
+    hint.textContent = msg || '保存失败';
+  });
+
+  function submit() {
+    if (busy) return;
+    var t = (input.value || '').trim();
+    if (!t) {
+      bar.className = 'bar err';
+      hint.textContent = '写点什么再回车';
+      input.focus();
+      return;
+    }
+    window.QN.submit(t);
+  }
+
+  input.addEventListener('keydown', function (e) {
+    if (e.isComposing || e.keyCode === 229) return;      // 中文输入法选词中
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      window.QN.hide();
+    }
+  });
+
+  input.addEventListener('input', function () {
+    if (bar.className !== 'bar') { bar.className = 'bar'; mark.textContent = '✎'; hint.textContent = baseHint(); }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { e.preventDefault(); window.QN.hide(); }
+  });
+
+  document.addEventListener('DOMContentLoaded', function () { input.focus(); });
+  input.focus();
+})();
+</script>
+</body>
+</html>

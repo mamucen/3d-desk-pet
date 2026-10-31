@@ -1,0 +1,1768 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>3D 小机器人 · 抱服务器</title>
+<style>
+  :root {
+    --ink: #23282c;
+    --edge: rgba(38, 44, 49, .20);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    user-select: none; -webkit-user-select: none;
+  }
+
+  /* ================= 容器 ================= */
+  #pet {
+    position: fixed;
+    left: 0; top: 0;
+    width: 164px;
+    height: 252px;
+    z-index: 9999;
+    touch-action: none;
+    cursor: grab;
+  }
+  #pet.dragging { cursor: grabbing; }
+
+  .scale {
+    position: absolute; inset: 0;
+    transform-origin: 50% 84%;
+    transform: scale(.75);
+    transition: transform .22s cubic-bezier(.34, 1.4, .64, 1);
+    will-change: transform;
+  }
+  #pet.following .scale { transform: scale(.58); }
+
+  .stage {
+    position: absolute; inset: 0;
+    perspective: 760px;
+    perspective-origin: 50% 58%;
+  }
+
+  .world {
+    position: absolute; inset: 0;
+    transform-style: preserve-3d;
+    transform: rotateY(-16deg) rotateX(4deg);
+  }
+
+  .robot {
+    position: absolute;
+    left: 50%; top: 151px;
+    width: 0; height: 0;
+    transform-style: preserve-3d;
+    will-change: transform;
+  }
+
+  .bob {
+    position: absolute; left: 0; top: 0;
+    width: 0; height: 0;
+    transform-style: preserve-3d;
+    animation: bob 2.8s ease-in-out infinite;
+  }
+  #pet.following .bob, #pet.moving .bob { animation: none; }
+  @keyframes bob {
+    0%, 100% { transform: translate3d(0, 0, 0); }
+    50% { transform: translate3d(0, -2px, 0); }
+  }
+
+  /* ================= 3D 方块 ================= */
+  .box3d {
+    position: absolute;
+    left: 0; top: 0;
+    transform-style: preserve-3d;
+    will-change: transform;
+  }
+  .face {
+    position: absolute;
+    left: 50%; top: 50%;
+    backface-visibility: hidden;
+    box-shadow: inset 0 0 0 1px var(--edge);
+  }
+  .face.f-front  { background: var(--c-front,  #f2f2ee); }
+  .face.f-back   { background: var(--c-back,   #dcdcd6); }
+  .face.f-right  { background: var(--c-right,  #d5d5ce); }
+  .face.f-left   { background: var(--c-left,   #e5e5df); }
+  .face.f-top    { background: var(--c-top,    #fbfbf9); }
+  .face.f-bottom { background: var(--c-bottom, #c6c6bf); }
+
+  /* ================= 地面阴影 ================= */
+  .shadow {
+    position: absolute;
+    left: 50%; top: 151px;
+    width: 100px; height: 20px;
+    margin-left: -50px; margin-top: 53px;
+    border-radius: 50%;
+    background: radial-gradient(ellipse at center, rgba(28, 33, 38, .34), rgba(28, 33, 38, 0) 68%);
+    animation: shadowPulse 2.8s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes shadowPulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(.93); opacity: .78; }
+  }
+
+  /* ================= 头部细节 ================= */
+  .screen {
+    position: absolute;
+    left: 10px; top: 7px;
+    width: 62px; height: 44px;
+    background: #0d1013;
+    border-radius: 6px;
+    box-shadow: inset 0 0 0 2px #23282c, inset 0 5px 12px rgba(0, 0, 0, .55);
+    overflow: hidden;
+  }
+  .screen::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; top: 0;
+    height: 40%;
+    background: linear-gradient(rgba(255, 255, 255, .07), rgba(255, 255, 255, 0));
+    pointer-events: none;
+  }
+  .eyewrap {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    will-change: transform;
+  }
+  .eyes-inner {
+    display: flex; align-items: center; gap: 11px;
+    transform-origin: center;
+    transition: transform .1s ease;
+  }
+  .eye {
+    position: relative;
+    width: 14px; height: 14px;
+    background: #fff;
+    transform: rotate(45deg);
+    border-radius: 2.5px;
+    box-shadow: 0 0 6px rgba(190, 235, 210, .35);
+  }
+  /* 笑眼是每只眼睛的子元素，永远和眼睛对齐（外层旋转 45°，里层转回来） */
+  .eye-happy {
+    position: absolute;
+    width: 17px; height: 8px;
+    left: 50%; top: 50%;
+    margin: -4.5px 0 0 -8.5px;
+    background: #fff;
+    border-radius: 17px 17px 0 0;
+    box-shadow: 0 0 6px rgba(190, 235, 210, .35);
+    transform: rotate(-45deg);
+    opacity: 0;
+    transition: opacity .12s ease;
+  }
+  #pet.happy .eye { background: transparent; box-shadow: none; }
+  #pet.happy .eye-happy { opacity: 1; }
+  /* 机器发烫：屏幕泛红光、眼睛转成暖色 */
+  #pet.hot .screen {
+    box-shadow: inset 0 0 0 2px #6b3a32, inset 0 5px 12px rgba(0, 0, 0, .55), 0 0 16px rgba(255, 110, 80, .55);
+  }
+  #pet.hot .eye, #pet.hot .eye-happy {
+    background: #ff8f5e;
+    box-shadow: 0 0 10px rgba(255, 120, 70, .95);
+  }
+  /* 发烫时的“温度牌”已经搬到怀里的服务器上了（见 .srv-face），头顶不再挂东西 */
+  /* 眨眼：只压到三分之一，别压成一条线（那样很像翻白眼） */
+  #pet.blink .eyes-inner { transform: scaleY(.34); }
+  #pet.happy .eyes-inner { transform: none; }
+
+  .chin {
+    position: absolute;
+    left: 10px; bottom: 6px;
+    width: 62px; height: 5px;
+    background: #dcdfda;
+    border-radius: 2px;
+    box-shadow: inset 0 0 0 1px var(--edge);
+  }
+  .head-gloss {
+    position: absolute;
+    left: 11px; top: 5px;
+    width: 17px; height: 4px;
+    background: #fff;
+    opacity: .85;
+    border-radius: 2px;
+  }
+
+  /* ================= 服务器机箱 =================
+     前脸不是装饰，是一块实时状态屏：CPU / 内存 / 最忙的核 / 负载条全写在上面 */
+  .server .f-front { background: #272d32; }
+  .srv-face {
+    position: absolute;
+    inset: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 2px 3px 3px;
+    border-radius: 2px;
+    overflow: hidden;
+    background: linear-gradient(180deg, #0f1d1b 0%, #0a1312 62%, #080f0e 100%);
+    box-shadow: inset 0 0 0 1px #3b464e, inset 0 1px 6px rgba(0, 0, 0, .9);
+    font-family: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
+    color: #74ecb6;
+    transition: color .35s ease, box-shadow .35s ease;
+  }
+  /* 顶栏：CPU 标识 + 过载告警 */
+  .srv-top {
+    flex: none;
+    display: flex; align-items: center; justify-content: space-between;
+    height: 6px; line-height: 6px;
+  }
+  .srv-cap {
+    font-size: 6px; font-weight: 700; letter-spacing: .7px;
+    color: #4a8c7c;
+    transition: color .35s ease;
+  }
+  .srv-flag {
+    font-size: 5px; font-weight: 700; letter-spacing: .4px;
+    color: #ff6a48;
+    opacity: 0;
+    transition: opacity .2s ease;
+  }
+  #pet.hot .srv-flag { opacity: 1; animation: flagBlink .62s steps(1) infinite; }
+  @keyframes flagBlink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: .12; } }
+  /* 主读数：整台机箱上最显眼的就是这个百分比 */
+  .srv-num {
+    flex: 1;
+    min-height: 0;
+    display: flex; align-items: center; justify-content: center;
+    line-height: 1;
+  }
+  .srv-num b {
+    font-size: 20px; font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -1px;
+    text-shadow: 0 0 7px rgba(110, 240, 180, .55);
+    transition: text-shadow .35s ease;
+  }
+  .srv-num i {
+    font-style: normal; font-size: 7px; font-weight: 700;
+    margin-left: 1px; opacity: .7;
+  }
+  /* 实时曲线：最近 ~26 帧的 CPU 占用，像迷你系统监视器一样滚动 */
+  .srv-graph {
+    flex: none;
+    display: flex; align-items: flex-end; gap: 1px;
+    height: 9px;
+  }
+  .srv-graph i {
+    flex: 1; min-height: 1px;
+    background: #1d3a34;
+    border-radius: .5px;
+    transition: height .3s ease, background .22s linear, box-shadow .22s linear;
+  }
+  .srv-graph i.on { background: #52e0a4; box-shadow: 0 0 2px rgba(82, 224, 164, .55); }
+  .srv-graph i.on.warn { background: #f0a93c; box-shadow: 0 0 2px rgba(240, 169, 60, .6); }
+  .srv-graph i.on.crit { background: #ff5a40; box-shadow: 0 0 3px rgba(255, 90, 64, .75); }
+  /* 底栏：内存 / 最忙的核 / 指示灯 */
+  .srv-foot {
+    flex: none;
+    display: flex; align-items: center; justify-content: space-between;
+    height: 8px;
+    font-size: 5.5px; letter-spacing: .2px;
+    color: #4a8c7c;
+  }
+  .srv-ch {
+    display: inline-flex; align-items: baseline; gap: 1px;
+    font-variant-numeric: tabular-nums;
+  }
+  .srv-ch em { font-style: normal; font-size: 5px; opacity: .62; }
+  .srv-ch b { font-weight: 700; color: #86f0c0; }
+  .srv-led {
+    width: 4px; height: 4px; border-radius: 50%;
+    flex: none;
+    background: #58d98a;
+    box-shadow: 0 0 4px #58d98a;
+    animation: ledBlink 2.4s steps(1) infinite;
+    transition: background .2s linear, box-shadow .2s linear;
+  }
+  .srv-led.warn { background: #efa63c; box-shadow: 0 0 5px #efa63c; }
+  .srv-led.crit { background: #ff4a30; box-shadow: 0 0 8px #ff4a30; }
+  @keyframes ledBlink { 0%, 72% { opacity: 1; } 73%, 100% { opacity: .22; } }
+
+  /* 过载：整块面板跟着发红 */
+  #pet.hot .srv-face {
+    color: #ffb896;
+    background: linear-gradient(180deg, #24130f 0%, #180c09 62%, #120806 100%);
+    box-shadow: inset 0 0 0 1px #7d4034, inset 0 0 10px rgba(255, 90, 50, .4), 0 0 12px rgba(255, 90, 50, .45);
+  }
+  #pet.hot .srv-cap { color: #c1715a; }
+  #pet.hot .srv-ch b { color: #ffbb9c; }
+  #pet.hot .srv-num b { text-shadow: 0 0 9px rgba(255, 130, 90, .85); }
+
+  .server .f-top {
+    background-image: repeating-linear-gradient(90deg, #1d2429 0 3px, #2b333a 3px 6px);
+  }
+
+  /* ================= 动作 ================= */
+  #pet.act-jump .bob { animation: jump .62s cubic-bezier(.3, 1.6, .5, 1); }
+  @keyframes jump {
+    0%   { transform: translate3d(0, 0, 0) scale(1, 1); }
+    18%  { transform: translate3d(0, 3px, 0) scale(1.05, .92); }
+    45%  { transform: translate3d(0, -30px, 0) scale(.96, 1.06); }
+    76%  { transform: translate3d(0, 0, 0) scale(1.04, .94); }
+    100% { transform: translate3d(0, 0, 0) scale(1, 1); }
+  }
+  #pet.act-spin .bob { animation: spin .72s cubic-bezier(.4, .1, .3, 1); }
+  @keyframes spin {
+    0%   { transform: rotate(0) translate3d(0, 0, 0); }
+    55%  { transform: rotate(360deg) translate3d(0, -10px, 0); }
+    100% { transform: rotate(360deg) translate3d(0, 0, 0); }
+  }
+  #pet.act-nod .bob { animation: nod .55s ease; }
+  @keyframes nod {
+    0%, 100% { transform: rotate(0); }
+    30% { transform: rotate(-7deg); }
+    66% { transform: rotate(6deg); }
+  }
+
+  /* ================= 气泡 ================= */
+  #bubble {
+    position: absolute;
+    left: 50%; bottom: 199px;
+    z-index: 7;
+    transform: translateX(-50%) translateY(5px) scale(.78);
+    background: #fff;
+    border: 2px solid var(--ink);
+    border-radius: 9px;
+    padding: 4px 8px;
+    font-size: 11.5px; font-weight: 600; color: var(--ink);
+    line-height: 1.38;
+    /* 窗口只有 164 宽、气泡能用的高度只有 ~53px（两行），
+       所以允许换行 + 限宽，再说长句子由 JS 拆成几段轮播 */
+    width: max-content;
+    max-width: 154px;
+    white-space: normal;
+    word-break: break-word;
+    text-align: center;
+    overflow: hidden;
+    opacity: 0; pointer-events: none;
+    transition: opacity .13s ease, transform .15s cubic-bezier(.3, 1.5, .5, 1);
+    box-shadow: 0 4px 10px rgba(20, 24, 28, .18);
+  }
+  #bubble::after {
+    content: ""; position: absolute; left: 50%; bottom: -7px;
+    width: 10px; height: 10px; background: #fff;
+    border-right: 2px solid var(--ink); border-bottom: 2px solid var(--ink);
+    transform: translateX(-50%) rotate(45deg);
+  }
+  #bubble.show { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  /* 贴着屏幕顶时气泡改到下方：贴窗口底往上长，行数变多也不会顶出窗口 */
+  #bubble.below { top: auto; bottom: 6px; }
+  #bubble.below::after {
+    bottom: auto; top: -7px;
+    border: none;
+    border-left: 2px solid var(--ink);
+    border-top: 2px solid var(--ink);
+  }
+
+  /* ================= 跟随开关 / 联动动作 ================= */
+  .actions {
+    position: absolute;
+    left: 50%; bottom: 2px;
+    transform: translateX(-50%) translateY(5px);
+    display: flex; align-items: center; gap: 5px;
+    opacity: 0; pointer-events: none;
+    transition: opacity .14s ease, transform .14s ease;
+    z-index: 6;
+  }
+  #pet:hover .actions, #pet.following .actions {
+    opacity: 1; pointer-events: auto;
+    transform: translateX(-50%) translateY(0);
+  }
+  /* 调试：强制显示 UI，便于截图核对遮挡关系（#ui 访问） */
+  #pet.force-ui .actions { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
+  #pet.force-ui #bubble { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+
+  .actions button {
+    display: flex; align-items: center; gap: 4px;
+    background: rgba(35, 40, 44, .9);
+    color: #f0f2f0;
+    border: none; border-radius: 99px;
+    padding: 4px 9px;
+    font-size: 11px; font-weight: 600;
+    font-family: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background .14s ease;
+    box-shadow: 0 4px 12px rgba(20, 24, 28, .22);
+  }
+  .actions button svg { width: 11px; height: 11px; flex: none; }
+  .actions button:hover { background: #191d20; }
+  #toggle.on { background: #2f6b57; }
+  #toggle.on:hover { background: #24513f; }
+  #noteBtn { background: rgba(47, 107, 87, .92); }
+  #noteBtn:hover { background: #24513f; }
+
+  /* ================= 待办角标（联动信息管家的数字） ================= */
+  .badge {
+    position: absolute;
+    left: 122px; top: 46px;
+    min-width: 21px; height: 21px;
+    padding: 0 6px;
+    border-radius: 11px;
+    background: #2f6b57;
+    color: #fff;
+    font-size: 11px; font-weight: 700;
+    line-height: 21px; text-align: center;
+    font-variant-numeric: tabular-nums;
+    box-shadow: 0 3px 9px rgba(20, 24, 28, .26), 0 0 0 2px rgba(255, 255, 255, .85);
+    opacity: 0;
+    transform: scale(.55);
+    transform-origin: 50% 50%;
+    transition: opacity .18s ease, transform .2s cubic-bezier(.3, 1.5, .5, 1), background .2s ease;
+    pointer-events: none;
+    cursor: pointer;
+    z-index: 4;
+  }
+  .badge.show { opacity: 1; transform: scale(1); pointer-events: auto; }
+  .badge.overdue { background: #c1445a; animation: badgePulse 1.8s ease-in-out infinite; }
+  @keyframes badgePulse {
+    0%, 100% { box-shadow: 0 3px 9px rgba(20, 24, 28, .26), 0 0 0 2px rgba(255, 255, 255, .85); }
+    50%      { box-shadow: 0 3px 9px rgba(20, 24, 28, .26), 0 0 0 6px rgba(193, 68, 90, .16); }
+  }
+
+  /* 有逾期待办时抖一下 */
+  #pet.shake { animation: petShake .42s ease-in-out 2; }
+  @keyframes petShake {
+    0%, 100% { transform: translateX(0) rotate(0); }
+    25%      { transform: translateX(-3px) rotate(-1.2deg); }
+    75%      { transform: translateX(3px) rotate(1.2deg); }
+  }
+
+  .particle {
+    position: absolute; font-size: 13px; pointer-events: none;
+    animation: floatUp .95s ease-out forwards;
+  }
+  @keyframes floatUp {
+    0%   { opacity: 0; transform: translate(0, 0) scale(.5) rotate(0); }
+    20%  { opacity: 1; }
+    100% { opacity: 0; transform: translate(var(--dx), -50px) scale(1.15) rotate(var(--rot)); }
+  }
+
+  /* ================= 右键菜单（桌面模式） ================= */
+  #menu {
+    position: fixed; left: 0; top: 0; z-index: 20;
+    min-width: 128px;
+    background: rgba(28, 32, 36, .96);
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, .32);
+    display: none;
+    backdrop-filter: blur(6px);
+  }
+  #menu.show { display: block; }
+  #menu button {
+    display: block; width: 100%;
+    text-align: left;
+    background: none; border: none; border-radius: 5px;
+    color: #eef1ee; font-size: 11.5px; font-weight: 600;
+    padding: 6px 9px; cursor: pointer;
+    font-family: inherit;
+  }
+  #menu button:hover { background: rgba(255, 255, 255, .12); }
+  #menu hr { border: none; border-top: 1px solid rgba(255, 255, 255, .12); margin: 3px 4px; }
+
+  #hint {
+    position: fixed; left: 50%; bottom: 14px;
+    transform: translateX(-50%);
+    font-size: 12px; color: rgba(60, 66, 72, .78);
+    background: rgba(255, 255, 255, .84);
+    border: 1px solid rgba(60, 66, 72, .18);
+    border-radius: 99px; padding: 5px 14px;
+    backdrop-filter: blur(4px);
+    transition: opacity .6s ease;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  #hint.fade { opacity: 0; }
+
+  /* ================= 皮肤（盲盒喵） =================
+     换肤 = 3D 机器人让位给一张「收藏卡」，浮动和影子照旧；
+     卡片旁边跟着一台主题色的小机箱，负载数据照常报。 */
+  #pet { --skin: #2fbf8f; }
+  .skin-img {
+    position: absolute; left: 50%; bottom: 10px; height: 182px; width: auto;
+    transform: translateX(-50%); display: none; cursor: pointer;
+    border-radius: 10px;
+    box-shadow: 0 0 0 1px rgba(255,255,255,.08), 0 12px 22px rgba(0,0,0,.5);
+    animation: bob 2.8s ease-in-out infinite;
+  }
+  .skin-chassis {
+    position: absolute; right: 5px; bottom: 16px; width: 54px;
+    padding: 5px 6px 4px; border-radius: 8px; display: none; cursor: pointer;
+    background: linear-gradient(160deg, color-mix(in srgb, var(--skin) 26%, #20262b), #151a1e);
+    border: 1px solid color-mix(in srgb, var(--skin) 55%, rgba(255,255,255,.12));
+    box-shadow: 0 6px 14px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.08);
+  }
+  .skc-top { display: flex; justify-content: space-between; align-items: center; font-size: 7px; letter-spacing: 1px; color: #9fb3ab; }
+  .skc-top b { color: var(--skin); }
+  .skc-flag { font-size: 6px; padding: 0 3px; border-radius: 3px; background: #c1445a; color: #fff; opacity: 0; }
+  #pet.hot .skc-flag { opacity: 1; }
+  .skc-num { font-size: 16px; font-weight: 800; color: var(--skin); font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .skc-num i { font-style: normal; font-size: 8px; color: #8fa79e; margin-left: 1px; }
+  .skc-foot { display: flex; gap: 5px; align-items: center; font-size: 7px; color: #8fa79e; font-variant-numeric: tabular-nums; }
+  .skc-foot b { color: #cfdad5; }
+  .skc-led { width: 5px; height: 5px; border-radius: 50%; background: #4caf7d; margin-left: auto; }
+  #pet.hot .skc-led { background: #e0795f; animation: ledBlink 2.4s steps(1) infinite; }
+  .skin-tag {
+    position: absolute; left: 50%; bottom: 3px; transform: translateX(-50%);
+    display: none; align-items: center; gap: 4px; white-space: nowrap;
+    background: rgba(8, 12, 11, .78); border: 1px solid rgba(255,255,255,.1);
+    border-radius: 99px; padding: 2px 4px 2px 8px;
+    font-size: 10px; font-weight: 700; color: #e6efeb; letter-spacing: 1px;
+  }
+  .skin-tag i {
+    font-style: normal; font-size: 8px; font-weight: 800; color: #101613;
+    background: var(--skin); border-radius: 99px; padding: 1px 6px; letter-spacing: 0;
+  }
+  #pet.skin-card .skin-img, #pet.skin-card .skin-chassis, #pet.skin-card .skin-tag { display: block; }
+  #pet.skin-card .skin-tag { display: flex; }
+  #pet.skin-card .robot { display: none; }
+  .skin-chassis:hover, .skin-img:hover { filter: brightness(1.12); }
+  /* 页内菜单里的皮肤选择（浏览器版；桌面版用系统原生菜单的「皮肤」子菜单） */
+  .menu-skins { padding: 4px 12px 6px; }
+  .ms-title { display: block; font-size: 10px; letter-spacing: 2px; color: #7d948b; margin-bottom: 6px; }
+  .ms-grid { display: flex; gap: 7px; flex-wrap: wrap; }
+  .ms-dot {
+    width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
+    border: 2px solid rgba(255,255,255,.14); box-sizing: border-box; padding: 0;
+    background: radial-gradient(circle at 35% 30%,
+      color-mix(in srgb, var(--c) 55%, #fff), var(--c) 62%, color-mix(in srgb, var(--c) 55%, #000));
+  }
+  .ms-dot:hover { border-color: rgba(255,255,255,.5); }
+  .ms-dot.sel { border-color: #fff; box-shadow: 0 0 0 2px rgba(255,255,255,.22); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bob, .shadow { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div id="pet" title="3D 小机器人">
+  <span id="bubble"></span>
+  <div class="scale">
+    <div class="stage">
+      <div class="world" id="world">
+        <div class="shadow"></div>
+        <div class="robot" id="robot">
+          <div class="bob" id="bob"></div>
+        </div>
+      </div>
+      <img id="skinImg" class="skin-img" alt="皮肤" draggable="false" />
+      <div class="skin-chassis" id="skinChassis" title="点我问管家">
+        <div class="skc-top"><b>CPU</b><span class="skc-flag">HOT</span></div>
+        <div class="skc-num"><span id="skCpu">--</span><i>%</i></div>
+        <div class="skc-foot"><span>M <b id="skMem">--</b></span><span>C <b id="skCore">--</b></span><i class="skc-led" id="skLed"></i></div>
+      </div>
+      <div class="skin-tag" id="skinTag"><span id="skinName"></span><i id="skinRarity"></i></div>
+    </div>
+    <div class="badge" id="badge" title="未完成待办"><span id="badgeNum">0</span></div>
+  </div>
+
+  <div class="actions">
+    <button id="toggle" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 12h11M11 6l6 6-6 6"/>
+      </svg>
+      <span id="toggleText">跟随</span>
+    </button>
+    <button id="noteBtn" type="button" title="去信息管家记一条">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="M14.5 6.5l3 3"/>
+      </svg>
+      <span>记一条</span>
+    </button>
+  </div>
+</div>
+
+<div id="menu">
+  <button type="button" data-act="quick">随手记一条（Ctrl+Alt+Space）</button>
+  <button type="button" data-act="clip">收下剪贴板（Ctrl+Alt+V）</button>
+  <button type="button" data-act="ask">问管家</button>
+  <hr />
+  <button type="button" data-act="openapp">打开信息管家</button>
+  <button type="button" data-act="note">快速记一条</button>
+  <button type="button" data-act="sys">系统负载面板（浏览器）</button>
+  <hr />
+  <button type="button" data-act="follow">跟随鼠标</button>
+  <button type="button" data-act="tts">语音播报：关</button>
+  <button type="button" data-act="top">取消置顶</button>
+  <button type="button" data-act="reset">回到右下角</button>
+  <button type="button" data-act="hide">隐身（Ctrl+Alt+H）</button>
+  <hr />
+  <div class="menu-skins">
+    <span class="ms-title">皮肤</span>
+    <div class="ms-grid" id="msGrid"></div>
+  </div>
+  <hr />
+  <button type="button" data-act="quit">退出</button>
+</div>
+
+<div id="hint">拖动移动 · 点它互动 · 点机箱问管家 · 双击切换跟随</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var HOST = (window.PetHost && window.PetHost.active) ? window.PetHost : null;
+
+  var pet = document.getElementById('pet');
+  var bob = document.getElementById('bob');
+  var robot = document.getElementById('robot');
+  var bubble = document.getElementById('bubble');
+  var hint = document.getElementById('hint');
+  var toggleBtn = document.getElementById('toggle');
+  var toggleText = document.getElementById('toggleText');
+  var noteBtn = document.getElementById('noteBtn');
+  var badge = document.getElementById('badge');
+  var badgeNum = document.getElementById('badgeNum');
+  var menu = document.getElementById('menu');
+
+  var PET_W = 164, PET_H = 252;
+  var BASE_SCALE = 0.75;                        // 待命（普通）模式下的缩放
+  var FOLLOW_SCALE = 0.58;                      // 跟随模式下的缩放
+  function scaleNow() { return following ? FOLLOW_SCALE : BASE_SCALE; }
+  var HEAD_Y = -60;                              // 头部中心相对锚点的高度
+  var HEAD_CY = 151 + HEAD_Y;                    // 头部中心在容器里的 Y
+  var HEAD_ANCHOR_OY = PET_H * 0.84;             // .scale 的 transform-origin（与 CSS 保持一致）
+
+  /* ============ 3D 方块工厂 ============ */
+  function makeBox(w, h, d, cls) {
+    var el = document.createElement('div');
+    el.className = 'box3d' + (cls ? ' ' + cls : '');
+    el.style.width = w + 'px';
+    el.style.height = h + 'px';
+    el.style.marginLeft = (-w / 2) + 'px';
+    el.style.marginTop = (-h / 2) + 'px';
+
+    var defs = [
+      ['front',  w, h, 'translate(-50%,-50%) translateZ(' + (d / 2) + 'px)'],
+      ['back',   w, h, 'translate(-50%,-50%) translateZ(' + (-d / 2) + 'px) rotateY(180deg)'],
+      ['right',  d, h, 'translate(-50%,-50%) rotateY(90deg) translateZ(' + (w / 2) + 'px)'],
+      ['left',   d, h, 'translate(-50%,-50%) rotateY(-90deg) translateZ(' + (w / 2) + 'px)'],
+      ['top',    w, d, 'translate(-50%,-50%) rotateX(90deg) translateZ(' + (h / 2) + 'px)'],
+      ['bottom', w, d, 'translate(-50%,-50%) rotateX(-90deg) translateZ(' + (h / 2) + 'px)']
+    ];
+
+    defs.forEach(function (d4) {
+      var f = document.createElement('div');
+      f.className = 'face f-' + d4[0];
+      f.style.width = d4[1] + 'px';
+      f.style.height = d4[2] + 'px';
+      f.style.transform = d4[3];
+      el.appendChild(f);
+    });
+    return el;
+  }
+
+  function place(box, x, y, z, extra) {
+    box.style.transform = 'translate3d(' + x + 'px,' + y + 'px,' + z + 'px)' + (extra ? ' ' + extra : '');
+    bob.appendChild(box);
+    return box;
+  }
+
+  /* ============ 组装 ============ */
+  // 腿
+  place(makeBox(26, 20, 26, 'leg'), -18, 44, 8);
+  place(makeBox(26, 20, 26, 'leg2'), 18, 44, 8);
+
+  // 身体
+  var body = place(makeBox(62, 50, 40, 'bodybox'), 0, 8, -3);
+  // 颈部
+  place(makeBox(30, 10, 24, 'neck'), 0, -22, -5);
+
+  // 手臂（向内合抱机箱）
+  var armL = place(makeBox(12, 36, 12, 'arm'), -36, 10, 32, 'rotateZ(-17deg)');
+  var armR = place(makeBox(12, 36, 12, 'arm'), 36, 10, 32, 'rotateZ(17deg)');
+  armL.style.animation = 'holdL 2.6s ease-in-out infinite';
+  armR.style.animation = 'holdR 2.6s ease-in-out infinite';
+
+  // 服务器机箱
+  var server = place(makeBox(70, 62, 44, 'server'), 0, 12, 46, 'rotateX(-4deg)');
+  // 前脸 = 状态屏：所有性能数据都长在机箱上，而不是飘在头顶
+  var srvFace = document.createElement('div');
+  srvFace.className = 'srv-face';
+  srvFace.title = '点我：问管家';
+  srvFace.innerHTML =
+    '<div class="srv-top">' +
+      '<span class="srv-cap">CPU</span>' +
+      '<span class="srv-flag">HOT</span>' +
+    '</div>' +
+    '<div class="srv-num"><b id="srvCpu">--</b><i>%</i></div>' +
+    '<div class="srv-graph" id="srvGraph"></div>' +
+    '<div class="srv-foot">' +
+      '<span class="srv-ch" title="内存占用"><em>M</em><b id="srvMem">--</b></span>' +
+      '<span class="srv-ch" title="最忙的一颗核"><em>C</em><b id="srvCore">--</b></span>' +
+      '<i class="srv-led" id="srvLed"></i>' +
+    '</div>';
+  server.querySelector('.f-front').appendChild(srvFace);
+
+  // 头部
+  var head = makeBox(82, 64, 46, 'head');
+  head.style.transform = 'translate3d(0,' + HEAD_Y + 'px,0)';
+  head.id = 'head';
+  bob.appendChild(head);
+
+  var headFront = head.querySelector('.f-front');
+  var screenEl = document.createElement('div');
+  screenEl.className = 'screen';
+  screenEl.innerHTML =
+    '<div class="eyewrap" id="eyewrap">' +
+      '<div class="eyes-inner">' +
+        '<div class="eye"><div class="eye-happy"></div></div>' +
+        '<div class="eye"><div class="eye-happy"></div></div>' +
+      '</div>' +
+    '</div>';
+  headFront.appendChild(screenEl);
+
+  var chin = document.createElement('div');
+  chin.className = 'chin';
+  headFront.appendChild(chin);
+
+  var gloss = document.createElement('div');
+  gloss.className = 'head-gloss';
+  headFront.appendChild(gloss);
+
+  var eyewrap = document.getElementById('eyewrap');
+
+  /* ============ 面色 / 关键帧注入 ============ */
+  var styleTag = document.createElement('style');
+  styleTag.textContent = [
+    '.head{--c-front:#f4f4f0;--c-top:#fdfdfb;--c-left:#e7e7e1;--c-right:#d9d9d2;--c-back:#deded8;--c-bottom:#cbcbc4}',
+    '.bodybox{--c-front:#ced3ce;--c-top:#e2e6e1;--c-left:#c2c7c2;--c-right:#b3b8b3;--c-back:#bcc1bc;--c-bottom:#a6aba6}',
+    '.leg{--c-front:#aab0aa;--c-top:#c3c8c2;--c-left:#9ea49e;--c-right:#8f958f;--c-bottom:#848a84}',
+    '.leg2{--c-front:#b6bcb6;--c-top:#cdd2cc;--c-left:#a8aea8;--c-right:#9aa09a;--c-bottom:#8f958f}',
+    '.neck{--c-front:#b9beb9;--c-top:#cfd4cf;--c-left:#adb2ad;--c-right:#a2a7a2;--c-bottom:#989d98}',
+    '.arm{--c-front:#c4c9c4;--c-top:#dbdfda;--c-left:#b7bcb7;--c-right:#aaafaa;--c-bottom:#a0a5a0}',
+    '.server{--c-front:#2b3238;--c-top:#39424a;--c-left:#222a2f;--c-right:#1b2226;--c-back:#1a2025;--c-bottom:#151a1e}',
+    '@keyframes holdL{0%,100%{transform:translate3d(-36px,10px,32px) rotateZ(-17deg)}50%{transform:translate3d(-36px,12px,32px) rotateZ(-13deg)}}',
+    '@keyframes holdR{0%,100%{transform:translate3d(36px,10px,32px) rotateZ(17deg)}50%{transform:translate3d(36px,12px,32px) rotateZ(13deg)}}'
+  ].join('\n');
+  document.head.appendChild(styleTag);
+
+  /* ============ 状态 ============ */
+  var VIEW = { x0: 0, y0: 0, x1: innerWidth, y1: innerHeight };
+
+  var cur = { x: 0, y: 0 };
+  var target = { x: 0, y: 0 };
+  var mouse = { x: innerWidth / 2, y: innerHeight / 2 };
+
+  var pos = { x: 0, y: 0 };
+  var dragging = false, dragMoved = 0, downAt = 0;
+  var dragOff = { x: 0, y: 0 }, downPos = { x: 0, y: 0 }, grab = { x: 0, y: 0 };
+  var following = false, alwaysTop = true;
+  var hoveringHead = false;
+  var follow = { speed: 0, phase: 0, lx: 0, ly: 0, mx: 0, my: 0, mhas: false };
+  var lastFrameAt = 0;
+  var lastSent = { x: -1, y: -1 };
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  /* ============ 位置写入（浏览器 / 桌面窗口 两种模式） ============ */
+  function applyPos() {
+    if (HOST) {
+      var rx = Math.round(pos.x), ry = Math.round(pos.y);
+      if (rx === lastSent.x && ry === lastSent.y) return;
+      lastSent.x = rx; lastSent.y = ry;
+      HOST.moveTo(rx, ry);
+    } else {
+      pet.style.left = pos.x + 'px';
+      pet.style.top = pos.y + 'px';
+    }
+  }
+
+  /* ============ 瞄准（头与眼睛） ============ */
+  function updateAim() {
+    var s = scaleNow();
+    var cx = pos.x + PET_W / 2;                                   // 头部中心 X
+    var cy = pos.y + HEAD_ANCHOR_OY + (HEAD_CY - HEAD_ANCHOR_OY) * s;  // 头部中心 Y（含缩放）
+
+    var dx = mouse.x - cx;
+    var dy = mouse.y - cy;
+    var dist = Math.hypot(dx, dy) || 1;
+    var reach = clamp(dist / 150, 0, 1);
+    target.x = clamp((dx / dist) * reach, -1, 1);
+    target.y = clamp((dy / dist) * reach, -1, 1);
+
+    var onHead = Math.abs(dx) < 46 * s + 8 && dy > -46 * s && dy < 20 * s;
+    if (onHead !== hoveringHead) {
+      hoveringHead = onHead;
+      pet.classList.toggle('happy', onHead);
+      if (onHead) say(pick(['好舒服～', '摸摸头。', '嗡——功率 +1']));
+    }
+  }
+
+  /* ============ 主循环 ============ */
+  function frame(now) {
+    var dt = lastFrameAt ? (now - lastFrameAt) / 1000 : 0.016;
+    lastFrameAt = now;
+    dt = clamp(dt, 0.004, 0.05);
+
+    cur.x += (target.x - cur.x) * 0.30;
+    cur.y += (target.y - cur.y) * 0.30;
+
+    var yaw = cur.x * 30;
+    var pitch = cur.y * 18;
+
+    head.style.transform =
+      'translate3d(' + (cur.x * 5).toFixed(2) + 'px,' + (HEAD_Y + cur.y * 4).toFixed(2) + 'px,0)' +
+      ' rotateY(' + yaw.toFixed(2) + 'deg) rotateX(' + pitch.toFixed(2) + 'deg)';
+
+    eyewrap.style.transform =
+      'translate3d(' + (cur.x * 8).toFixed(2) + 'px,' + (cur.y * 6).toFixed(2) + 'px,0)';
+
+    body.style.transform =
+      'translate3d(' + (cur.x * 1.6).toFixed(2) + 'px,8px,-3px) rotateY(' + (yaw * 0.12).toFixed(2) + 'deg)';
+
+    if (following && !dragging) stepFollow(now, dt);
+
+    requestAnimationFrame(frame);
+  }
+
+  /* ============ 跟随：连续牵引（像被牵着走，而不是一跳一跳） ============ */
+  var LEAD_Y = 76;               // 光标停在头顶上方多少像素
+  var MAX_V = 1700;              // 最高速度 px/s
+
+  function visualBox(s) {
+    // .scale 以 50% 84% 为原点，算出缩小后可见区域相对窗口左上角的偏移
+    var s2 = s || scaleNow();
+    var w = PET_W * s2, h = PET_H * s2;
+    return { ox: (PET_W - w) / 2, oy: HEAD_ANCHOR_OY * (1 - s2), w: w, h: h };
+  }
+
+  function clampPos() {
+    var b = visualBox();
+    pos.x = clamp(pos.x, VIEW.x0 - b.ox, VIEW.x1 - b.ox - b.w);
+    pos.y = clamp(pos.y, VIEW.y0 - b.oy, VIEW.y1 - b.oy - b.h);
+  }
+
+  function resetFollowMotion() {
+    follow.speed = 0;
+    follow.phase = 0;
+    follow.mhas = false;
+    robot.style.transform = 'translate3d(0,0,0)';
+  }
+
+  function stepFollow(now, dt) {
+    // 光标落在机器人身上（或右键菜单开着）时站定不动：
+    // 不然按钮会跟着窗口一起跑，永远点不到「停止」
+    if (hitTest(mouse.x - pos.x, mouse.y - pos.y)) {
+      follow.speed *= Math.max(0, 1 - dt * 12);
+      if (follow.speed < 15) {
+        follow.speed = 0;
+        robot.style.transform = 'translate3d(0,0,0)';
+      } else {
+        var run0 = clamp(follow.speed / 760, 0, 1);
+        var arc0 = Math.abs(Math.sin(follow.phase)) * 11 * run0;
+        robot.style.transform = 'translate3d(0,' + (-arc0).toFixed(2) + 'px,0)';
+      }
+      return;
+    }
+    var b = visualBox();
+    var px0 = pos.x, py0 = pos.y;
+
+    // 光标速度 → 甩尾量：跑得越快，小机器人被甩得越靠后
+    var mvx = 0, mvy = 0;
+    if (follow.mhas) {
+      mvx = (mouse.x - follow.mx) / dt;
+      mvy = (mouse.y - follow.my) / dt;
+    }
+    follow.mx = mouse.x; follow.my = mouse.y; follow.mhas = true;
+
+    var mspd = Math.hypot(mvx, mvy);
+    if (mspd > 4000) { mvx = 0; mvy = 0; mspd = 0; }      // 光标瞬移（换屏之类）不甩尾
+    var lag = mspd > 40 ? Math.min(56, mspd * 0.05) : 0;
+    var lagX = mspd > 1 ? (-mvx / mspd) * lag : 0;
+    var lagY = mspd > 1 ? (-mvy / mspd) * lag : 0;
+
+    var tx = mouse.x + lagX - PET_W / 2;                   // 目标：窗口左上角
+    var ty = mouse.y + lagY + LEAD_Y - (b.oy + b.h / 2);
+
+    var dx = tx - pos.x, dy = ty - pos.y;
+    var dist = Math.hypot(dx, dy);
+
+    if (dist > 3) {
+      var v = Math.min(MAX_V, dist * 12);                  // 越远越快，接近时自然减速
+      var stepLen = v * dt;
+      if (stepLen >= dist) { pos.x = tx; pos.y = ty; }
+      else { pos.x += (dx / dist) * stepLen; pos.y += (dy / dist) * stepLen; }
+      clampPos();
+      applyPos();
+    }
+
+    // 用真实速度驱动奔跑的起伏，停下时自然归零
+    var moved = Math.hypot(pos.x - px0, pos.y - py0);
+    var spd = moved / dt;
+    follow.speed += (spd - follow.speed) * 0.35;
+    follow.phase += moved * 0.075;
+    if (follow.phase > 1e6) follow.phase = 0;
+
+    var run = clamp(follow.speed / 760, 0, 1);
+    var arc = Math.abs(Math.sin(follow.phase)) * 11 * run;
+    var sq = Math.sin(follow.phase * 2) * 0.045 * run;
+    var tilt = clamp(((pos.x - px0) / dt) * 0.008, -7, 7);
+
+    robot.style.transform =
+      'translate3d(0,' + (-arc).toFixed(2) + 'px,0)' +
+      ' scale(' + (1 - sq).toFixed(3) + ',' + (1 + sq).toFixed(3) + ')' +
+      ' rotate(' + tilt.toFixed(2) + 'deg)';
+  }
+
+  /* ============ 交互 ============ */
+  function bindInteraction() {
+    addEventListener('pointermove', function (e) {
+      if (HOST) return;                       // 桌面模式改用系统光标流，窗口会跟着跑
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
+
+      if (dragging) {
+        var nx = downPos.x + (e.clientX - dragOff.x);
+        var ny = downPos.y + (e.clientY - dragOff.y);
+        dragMoved += Math.abs(nx - pos.x) + Math.abs(ny - pos.y);
+        pos.x = nx; pos.y = ny;
+        clampPos();
+        applyPos();
+        dragOff.x = e.clientX; dragOff.y = e.clientY;
+        downPos.x = pos.x; downPos.y = pos.y;
+        resetFollowMotion();
+        return;
+      }
+      updateAim();
+    }, { passive: true });
+
+    addEventListener('blur', function () { target.x = 0; target.y = 0; });
+
+    // 键盘兜底：按 F 开关跟随（桌面版另有全局快捷键 Ctrl+Alt+F）
+    addEventListener('keydown', function (e) {
+      var tag = (e.target && e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+      if (e.key === 'f' || e.key === 'F') {
+        setFollow(!following);
+        e.preventDefault();
+      }
+    });
+
+    pet.addEventListener('pointerdown', function (e) {
+      if (e.target.closest('#toggle, #noteBtn, #badge')) return;
+      if (e.button !== 0 && e.pointerType === 'mouse') return;
+      dragging = true;
+      dragMoved = 0;
+      downAt = Date.now();
+      if (HOST) {
+        grab.x = mouse.x - pos.x;
+        grab.y = mouse.y - pos.y;
+      } else {
+        dragOff.x = e.clientX; dragOff.y = e.clientY;
+        downPos.x = pos.x; downPos.y = pos.y;
+      }
+      pet.classList.add('dragging');
+      hideMenu();
+    });
+
+    pet.addEventListener('pointerup', function (e) {
+      if (!dragging) return;
+      dragging = false;
+      pet.classList.remove('dragging');
+      if (dragMoved < 10 && Date.now() - downAt < 420) react(e);
+    });
+
+    pet.addEventListener('dblclick', function (e) {
+      if (e.target.closest('#toggle, #noteBtn, #badge')) return;
+      setFollow(!following);
+    });
+
+    toggleBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      setFollow(!following);
+    });
+
+    noteBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      openApp('note');
+    });
+
+    badge.addEventListener('click', function (e) {
+      e.stopPropagation();
+      openApp('todo');
+    });
+
+    pet.addEventListener('dragstart', function (e) { e.preventDefault(); });
+
+    // 兜底：指针在元素外抬起时也要结束拖拽
+    addEventListener('pointerup', function () {
+      if (!dragging) return;
+      dragging = false;
+      pet.classList.remove('dragging');
+    });
+    addEventListener('pointercancel', function () {
+      if (!dragging) return;
+      dragging = false;
+      pet.classList.remove('dragging');
+    });
+  }
+
+  /* ============ 跟随开关 ============ */
+  function setFollow(on) {
+    following = on;
+    pet.classList.toggle('following', on);
+    toggleBtn.classList.toggle('on', on);
+    toggleText.textContent = on ? '停止' : '跟随';
+
+    if (on) {
+      resetFollowMotion();
+      follow.lx = pos.x; follow.ly = pos.y;
+      say('抱紧机箱，跟上你！');
+      pet.classList.add('moving');
+    } else {
+      resetFollowMotion();
+      pet.classList.remove('moving');
+      say('原地待命～');
+      clampPos();
+      applyPos();
+    }
+    if (HOST) HOST.setFollowing(on);
+    syncMenu();
+  }
+
+  /* ============ 与「信息管家」的联动 ============ */
+  // 必须带 sharecode，裸域名会被平台判定「链接不完整」(403)
+  var APP_FALLBACK = 'https://your-app-id.app.workbuddy.host/?sharecode=YOUR_SHARECODE';
+  var link = { online: false, state: null, appUrl: '' };
+  var KIND_LABEL = { thought: '想法', resource: '资料', todo: '待办' };
+  var lastEventId = 0;
+  var shakeTimer = null;
+
+  // 只认信息管家的正式地址（workbuddy.host / workbuddy.cn 的子域）或 localhost，
+  // 别的域名一律不收，防止占位地址混进缓存
+  function usableUrl(u) {
+    if (typeof u !== 'string') return '';
+    var s = u.trim();
+    var m = /^(https?:\/\/[^\/\s?#]+)/i.exec(s);
+    if (!m) return '';
+    var host = m[1].replace(/^https?:\/\//i, '').split(':')[0].toLowerCase();
+    if (host === 'localhost') return s;
+    if (/(^|\.)workbuddy\.host$/.test(host)) return s;
+    if (/(^|\.)workbuddy\.cn$/.test(host)) return s;
+    return '';
+  }
+
+  function paintBadge() {
+    var s = link.state || {};
+    if (!link.online) {
+      badge.classList.remove('show', 'overdue');
+      return;
+    }
+    var n = Number(s.todos || 0);
+    if (!n) {
+      badge.classList.remove('show', 'overdue');
+      return;
+    }
+    badgeNum.textContent = n > 99 ? '99+' : String(n);
+    badge.classList.add('show');
+    badge.classList.toggle('overdue', !!s.overdue);
+    badge.title = s.overdue
+      ? ('共 ' + n + ' 件待办，其中 ' + s.overdue + ' 件已逾期')
+      : ('共 ' + n + ' 件待办');
+  }
+
+  function shakePet() {
+    pet.classList.remove('shake');
+    void pet.offsetWidth;
+    pet.classList.add('shake');
+    clearTimeout(shakeTimer);
+    shakeTimer = setTimeout(function () { pet.classList.remove('shake'); }, 950);
+  }
+
+  function announceLink() {
+    var s = link.state || {};
+    if (s.overdue) { say('有 ' + s.overdue + ' 件事逾期了！'); shakePet(); }
+    else if (s.today) say('今天有 ' + s.today + ' 件事要做。');
+    else if (s.todos) say('还有 ' + s.todos + ' 件待办，慢慢来。');
+    else say('管家已连上，收件箱很干净。');
+  }
+
+  function announceAnalysis(ev) {
+    var name = ev.title ? ('「' + ev.title + '」') : '刚记的那条';
+    var kind = KIND_LABEL[ev.kind] || '记录';
+    say(name + ' → ' + kind + (ev.category ? ' · ' + ev.category : ''));
+    if (ev.related) {
+      setTimeout(function () { say('还找到 ' + ev.related + ' 条旧记录。'); }, 3400);
+    }
+  }
+
+  function onLink(p) {
+    if (!p) return;
+    var was = link.online;
+    link.online = !!p.online;
+    if (p.state) link.state = p.state;
+    var u = usableUrl(p.appUrl);
+    if (u) link.appUrl = u;
+
+    paintBadge();
+
+    if (!was && link.online) announceLink();
+
+    var ev = p.state && p.state.event;
+    var fresh = p.state && (Date.now() - (p.state.ts || 0) < 20000);
+    if (ev && ev.id && ev.id !== lastEventId && fresh) {
+      lastEventId = ev.id;
+      announceAnalysis(ev);
+    }
+  }
+
+  function openApp(cmd) {
+    if (HOST) {
+      HOST.linkCmd(cmd || 'focus');
+      say(cmd === 'note' ? '去管家那儿写吧～' : cmd === 'ask' ? '想问什么？我翻记录去。' : '这就去管家那儿！');
+      return;
+    }
+    var url = usableUrl(link.appUrl) || APP_FALLBACK;
+    say('帮你打开管家。');
+    try { window.open(url, '_blank'); } catch (e) { /* 被拦截就算了 */ }
+  }
+
+  /* ============ 互动反应 ============ */
+  var IDLE_WORDS = [
+    '在呢！', '风扇转速正常。', '这台机器我抱着呢。',
+    '今天也要加油呀。', '嗡——待机中。', '要不要摸摸头？',
+    '双击我可以跟着你走。'
+  ];
+  var POKES = [
+    '别戳我啦！', '嘿嘿，痒。', '机箱可沉了……',
+    '差点把你甩下去！', '再戳就要跳舞了。', '哔——'
+  ];
+  var PARTICLES = ['✦', '♥', '♪', '✧', '★', '⚙'];
+
+  function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
+
+  /* 气泡只有 ~154px 宽、两行高（约 24 个汉字），更长的句子必须拆开轮播，
+     否则会被窗口边缘切掉 —— 也就是用户说的「对话框只显示一部分」。 */
+  var SAY_MAX = 24;
+  function splitSays(text) {
+    var s = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+    if (!s) return [];
+    if (s.length <= SAY_MAX) return [s];
+    var pieces = s.match(/[^。！？；，、,.!?;…~～]+[。！？；，、,.!?;…~～]*/g) || [s];
+    var out = [], buf = '';
+    for (var i = 0; i < pieces.length; i++) {
+      var p = pieces[i];
+      if (p.length > SAY_MAX) {              // 单句本身就太长：先冲掉攒的，再按长度硬切
+        if (buf) { out.push(buf); buf = ''; }
+        for (var k = 0; k < p.length; k += SAY_MAX) out.push(p.slice(k, k + SAY_MAX));
+        continue;
+      }
+      if ((buf + p).length > SAY_MAX) { if (buf) out.push(buf); buf = p; }
+      else buf += p;
+    }
+    if (buf) out.push(buf);
+    return out;
+  }
+
+  var sayQueue = [];
+  var sayTimer = null;
+  function paintSay() {
+    if (!sayQueue.length) { bubble.classList.remove('show'); return; }
+    var item = sayQueue.shift();
+    bubble.textContent = item.t;
+    bubble.classList.toggle('below', pos.y < VIEW.y0 + 62);
+    bubble.classList.add('show');
+    sayTimer = setTimeout(function () {
+      bubble.classList.remove('show');
+      if (sayQueue.length) sayTimer = setTimeout(paintSay, 130);
+    }, item.hold);
+  }
+
+  // opts.hold：每段停留多久（默认 1.5 秒；重要消息可以传更长）
+  function say(text, opts) {
+    var parts = splitSays(text);
+    if (!parts.length) return;
+    var hold = (opts && opts.hold) || 1500;
+    if (parts.length > 1) hold = Math.max(1200, Math.min(hold, 2100));
+    clearTimeout(sayTimer);
+    sayQueue = parts.map(function (p) { return { t: p, hold: hold }; });
+    paintSay();
+  }
+
+  function spawnParticles(n) {
+    for (var i = 0; i < n; i++) {
+      var p = document.createElement('span');
+      p.className = 'particle';
+      p.textContent = pick(PARTICLES);
+      p.style.left = (46 + Math.random() * 66) + 'px';
+      p.style.top = (60 + Math.random() * 40) + 'px';
+      p.style.setProperty('--dx', (Math.random() * 56 - 28).toFixed(0) + 'px');
+      p.style.setProperty('--rot', (Math.random() * 80 - 40).toFixed(0) + 'deg');
+      pet.appendChild(p);
+      (function (el) { setTimeout(function () { el.remove(); }, 1000); })(p);
+    }
+  }
+
+  function react(e) {
+    // 点怀里的机箱（或皮肤旁边那台小机箱）= 打开管家的问答（点别的部位还是摸它）
+    if (e && e.target && e.target.closest && (e.target.closest('.server') || e.target.closest('.skin-chassis'))) {
+      openApp('ask');
+      return;
+    }
+    var act = pick(['act-jump', 'act-spin', 'act-nod']);
+    var rect = pet.getBoundingClientRect();
+    var onHead = e && (e.clientY - rect.top) < rect.height * 0.48;
+
+    pet.classList.remove('act-jump', 'act-spin', 'act-nod');
+    void pet.offsetWidth;
+    pet.classList.add(act);
+    setTimeout(function () { pet.classList.remove(act); }, 780);
+
+    if (onHead) {
+      pet.classList.add('happy');
+      setTimeout(function () { if (!hoveringHead) pet.classList.remove('happy'); }, 1100);
+      say(pick(['开心！', '耶！', '(≧▽≦)']));
+      spawnParticles(6);
+    } else {
+      say(pick(POKES));
+      if (Math.random() < 0.55) spawnParticles(3);
+    }
+  }
+
+  /* ============ 眨眼 / 闲聊 ============ */
+  function scheduleBlink() {
+    setTimeout(function () {
+      // 摸头的时候正眯着眼笑，这时候再眨眼会糊成一条线，直接跳过
+      if (pet.classList.contains('happy')) { scheduleBlink(); return; }
+      pet.classList.add('blink');
+      setTimeout(function () {
+        pet.classList.remove('blink');
+        if (Math.random() < 0.25) {
+          setTimeout(function () {
+            pet.classList.add('blink');
+            setTimeout(function () { pet.classList.remove('blink'); }, 110);
+          }, 150);
+        }
+      }, 110);
+      scheduleBlink();
+    }, 2600 + Math.random() * 3600);
+  }
+
+  function scheduleChatter() {
+    setTimeout(function () {
+      if (!dragging && !document.hidden && !menu.classList.contains('show')) {
+        var s = link.state;
+        if (link.online && s && s.todos) {
+          say(s.overdue ? ('还有 ' + s.overdue + ' 件逾期…') : ('还有 ' + s.todos + ' 件待办，加油。'));
+        } else {
+          say(pick(IDLE_WORDS));
+        }
+      }
+      scheduleChatter();
+    }, 15000 + Math.random() * 20000);
+  }
+
+  /* ============ 系统负载播报（CPU / 内存） ============ */
+  var SYS_HIGH = 80;          // 平均占用高于这个算“忙”
+  var SYS_CORE = 92;          // 任意一颗核被顶满也算“忙”（多核机器上单线程程序不会拉高平均值）
+  var SYS_LOW = 55;           // 平均低于这个、
+  var SYS_CORE_LOW = 80;      // 且没有核被顶满 → 算凉下来
+  var SYS = {
+    cpu: 0, coreMax: 0, mem: 0, ts: 0, cores: 0,
+    high: 0, low: 0, hotSince: 0, lastSayAt: 0, memSaidAt: 0
+  };
+
+  function sysBusy() { return SYS.cpu >= SYS_HIGH || SYS.coreMax >= SYS_CORE; }
+  function sysCalm() { return SYS.cpu <= SYS_LOW && SYS.coreMax <= SYS_CORE_LOW; }
+
+  function sysHandle(p) {
+    if (!p) return;
+    SYS.cpu = Number(p.cpu) || 0;
+    SYS.coreMax = Number(p.coreMax) || 0;
+    SYS.mem = Number(p.mem) || 0;
+    SYS.cores = Number(p.cores) || 0;
+    SYS.ts = Number(p.ts) || Date.now();
+    // 连续两次越线才算数，避免一秒的抖动就嚷嚷
+    if (sysBusy()) SYS.high++; else SYS.high = 0;
+    if (sysCalm()) SYS.low++; else SYS.low = 0;
+    srvPaint(true);          // 采样一落地就把数字刷到机箱上
+  }
+
+  function sysFresh(now) { return SYS.ts && (now - SYS.ts) < 8000; }
+
+  function sysHotText() {
+    if (SYS.cpu >= SYS_HIGH) {
+      return pick([
+        'CPU ' + SYS.cpu + '% 了，风扇要起飞…',
+        '有点烫：CPU ' + SYS.cpu + '%。',
+        '主人，机器在飙车：CPU ' + SYS.cpu + '%'
+      ]);
+    }
+    return pick([
+      '有颗核被顶满了（' + SYS.coreMax + '%），谁在跑？',
+      '单核 ' + SYS.coreMax + '% 拉满了，风扇有点响…'
+    ]);
+  }
+
+  /* ---- 把读数画到怀里的服务器面板上（实时滚动 + 数字平滑滚动到真实值） ---- */
+  var srvCpuEl = document.getElementById('srvCpu');
+  var srvMemEl = document.getElementById('srvMem');
+  var srvCoreEl = document.getElementById('srvCore');
+  var srvLedEl = document.getElementById('srvLed');
+  var srvGraphEl = document.getElementById('srvGraph');
+
+  // 曲线：最近 26 帧的 CPU 历史
+  var GRAPH_N = 26;
+  var srvSegs = [];
+  var srvHist = [];
+  for (var segI = 0; segI < GRAPH_N; segI++) {
+    var seg = document.createElement('i');
+    seg.style.height = '6%';
+    srvSegs.push(srvGraphEl.appendChild(seg));
+  }
+
+  // 数字不做跳变：用 rAF 把显示值平滑滚到真实采样值，到位后停在真实值上
+  var srvTarget = { cpu: 0, mem: 0, core: 0 };
+  var srvDisp = { cpu: 0, mem: 0, core: 0 };
+  var srvRaf = 0, srvRafAt = 0;
+
+  function srvWriteNums() {
+    var c = Math.round(srvDisp.cpu);
+    if (srvCpuEl.textContent !== '' + c) srvCpuEl.textContent = c;
+    var m = Math.round(srvDisp.mem);
+    if (srvMemEl.textContent !== '' + m) srvMemEl.textContent = m;
+    var o = Math.round(srvDisp.core);
+    if (srvCoreEl.textContent !== '' + o) srvCoreEl.textContent = o;
+    skinPaintNums(c, m, o);       // 皮肤旁边那台小机箱同步报数
+  }
+
+  function srvStep(now) {
+    var dt = Math.min(120, now - (srvStep.t || now));
+    srvStep.t = now;
+    var k = 1 - Math.exp(-dt / 160);          // 约 0.5s 内滚到位
+    srvDisp.cpu += (srvTarget.cpu - srvDisp.cpu) * k;
+    srvDisp.mem += (srvTarget.mem - srvDisp.mem) * k;
+    srvDisp.core += (srvTarget.core - srvDisp.core) * k;
+    srvWriteNums();
+    var busy = Math.abs(srvTarget.cpu - srvDisp.cpu) > .3 ||
+               Math.abs(srvTarget.mem - srvDisp.mem) > .3 ||
+               Math.abs(srvTarget.core - srvDisp.core) > .3;
+    if (busy) {
+      srvRaf = requestAnimationFrame(srvStep);
+    } else {
+      srvDisp.cpu = srvTarget.cpu; srvDisp.mem = srvTarget.mem; srvDisp.core = srvTarget.core;
+      srvWriteNums();
+      srvRaf = 0;
+    }
+  }
+
+  function srvKick() {
+    if (!srvRaf) {
+      srvStep.t = 0;
+      srvRaf = requestAnimationFrame(srvStep);
+    }
+  }
+
+  function srvPaintGraph(live) {
+    var off = GRAPH_N - srvHist.length;        // 右对齐：最新一帧永远贴着右端
+    for (var k = 0; k < GRAPH_N; k++) {
+      var seg = srvSegs[k];
+      var idx = k - off;
+      var v = (live && idx >= 0) ? srvHist[idx] : null;
+      if (v == null) {                          // 历史还没填满的空槽
+        seg.className = '';
+        seg.style.height = '6%';
+        continue;
+      }
+      seg.style.height = Math.max(6, v) + '%';
+      seg.className = 'on' + (v >= 85 ? ' crit' : v >= 65 ? ' warn' : '');
+    }
+  }
+
+  var srvLastStamp = '', srvLiveStamp = false;
+  function srvPaint(live) {
+    if (typeof live !== 'boolean') live = sysFresh(Date.now());
+
+    var cpu = clamp(SYS.cpu, 0, 100);
+    var mem = clamp(SYS.mem, 0, 100);
+    var core = clamp(SYS.coreMax, 0, 100);
+
+    if (live !== srvLiveStamp) { srvLastStamp = ''; srvLiveStamp = live; }
+    var stamp = Math.round(cpu) + '/' + Math.round(mem) + '/' + Math.round(core);
+    if (stamp !== srvLastStamp) {
+      srvLastStamp = stamp;
+      if (live) {
+        srvTarget.cpu = cpu; srvTarget.mem = mem; srvTarget.core = core;
+        srvKick();
+        srvHist.push(cpu);
+        if (srvHist.length > GRAPH_N) srvHist.shift();
+        srvPaintGraph(true);
+      } else {
+        if (srvRaf) { cancelAnimationFrame(srvRaf); srvRaf = 0; }
+        srvHist.length = 0;
+        srvPaintGraph(false);
+        srvCpuEl.textContent = '--'; srvMemEl.textContent = '--'; srvCoreEl.textContent = '--';
+      }
+      // 指示灯随负载变色 + 加快闪烁：越忙闪得越急
+      var lvl = !live ? '' : (core >= SYS_CORE || cpu >= SYS_HIGH) ? 'crit'
+              : (core >= 78 || cpu >= SYS_LOW) ? 'warn' : '';
+      srvLedEl.className = 'srv-led' + (lvl ? ' ' + lvl : '');
+      srvLedEl.style.animationDuration = (lvl === 'crit' ? 0.26 : lvl === 'warn' ? 0.9 : 2.4) + 's';
+      srvFace.title = live
+        ? ('CPU 平均 ' + Math.round(cpu) + '% · 最忙的核 ' + Math.round(core) + '% · 内存 ' + Math.round(mem) + '% · ' + (SYS.cores || '?') + ' 核 · 点我问管家')
+        : '点我问管家（CPU 读数需要桌面版）';
+    }
+  }
+
+  function sysTick() {
+    var now = Date.now();
+    if (!sysFresh(now)) {
+      pet.classList.remove('hot');
+      srvPaint(false);
+      return;
+    }
+    srvPaint(true);
+
+    if (!SYS.hotSince) {
+      if (SYS.high >= 2) {
+        SYS.hotSince = now;
+        pet.classList.add('hot');
+        if (now - SYS.lastSayAt > 30000) {
+          SYS.lastSayAt = now;
+          announce(sysHotText());
+          if (SYS.cpu >= 95 || SYS.coreMax >= 99) shakePet();
+        }
+      }
+      return;
+    }
+
+    if (SYS.low >= 2) {
+      var lasted = now - SYS.hotSince;
+      SYS.hotSince = 0;
+      pet.classList.remove('hot');
+      if (lasted > 6000 && now - SYS.lastSayAt > 3000) {
+        SYS.lastSayAt = now;
+        announce('CPU 降回去了，现在 ' + SYS.cpu + '%。');
+      }
+      return;
+    }
+
+    if (now - SYS.lastSayAt > 45000) {
+      SYS.lastSayAt = now;
+      announce(SYS.cpu >= SYS_HIGH
+        ? pick(['还是 ' + SYS.cpu + '%，什么程序在跑？', 'CPU 一直 ' + SYS.cpu + '%，要不要看看任务管理器？'])
+        : ('那颗核还满着（' + SYS.coreMax + '%），要不要看看任务管理器？'));
+    }
+  }
+
+  function sysReport() {
+    if (!sysFresh(Date.now())) { say('这边读不到系统负载（网页版没有这个权限）。'); return; }
+    say('CPU ' + SYS.cpu + '%（最忙的核 ' + SYS.coreMax + '%），内存 ' + SYS.mem + '%，' + SYS.cores + ' 核。');
+  }
+
+  /* 语音播报（默认关闭，右键菜单可开） */
+  var ttsOn = false;
+  try { ttsOn = localStorage.getItem('pet.tts') === '1'; } catch (e) { /* ignore */ }
+
+  function speakAloud(text) {
+    if (!ttsOn) return;
+    try {
+      if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) return;
+      var u = new SpeechSynthesisUtterance(String(text));
+      u.lang = 'zh-CN';
+      u.rate = 1.02;
+      u.pitch = 1.06;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    } catch (e) { /* 没有语音引擎就算了 */ }
+  }
+
+  // 需要“说出来”的消息走这里：气泡 +（可选）语音
+  function announce(text) {
+    say(text);
+    speakAloud(text);
+  }
+
+  /* ============ 皮肤（盲盒喵） ============
+     经典 3D 机器人 + 5 款盲盒皮肤；不管穿哪身，旁边都跟着一台
+     主题色的小机箱，CPU/内存照常报（srvWriteNums 会同步刷过来）。 */
+  var SKINS = {
+    robot:   { id: 'robot',    name: '经典机器人', rarity: '',   theme: '#2fbf8f' },
+    pixel:   { id: 'pixel',    name: '像素喵',     rarity: 'R',  theme: '#57d97a' },
+    stellar: { id: 'stellar',  name: '星际喵',     rarity: 'SR', theme: '#4da3ff' },
+    rich:    { id: 'rich',     name: '暴富喵',     rarity: 'UR', theme: '#e8b64c' },
+    camera:  { id: 'camera',   name: '镜头喵',     rarity: 'R',  theme: '#f5c542' },
+    pubg:    { id: 'pubg',     name: '和平精英喵', rarity: 'R',  theme: '#37c8f0' }
+  };
+  var skinId = 'robot';
+  var skinImg = document.getElementById('skinImg');
+  var skinChassis = document.getElementById('skinChassis');
+  var skinName = document.getElementById('skinName');
+  var skinRarity = document.getElementById('skinRarity');
+  var skCpuEl = document.getElementById('skCpu');
+  var skMemEl = document.getElementById('skMem');
+  var skCoreEl = document.getElementById('skCore');
+
+  function skinPaintNums(c, m, o) {
+    if (!skCpuEl) return;
+    if (skCpuEl.textContent !== '' + c) skCpuEl.textContent = c;
+    if (skMemEl.textContent !== '' + m) skMemEl.textContent = m;
+    if (skCoreEl.textContent !== '' + o) skCoreEl.textContent = o;
+  }
+
+  function applySkin(id) {
+    var s = SKINS[id] || SKINS.robot;
+    skinId = s.id;
+    var on = s.id !== 'robot';
+    pet.classList.toggle('skin-card', on);
+    if (on) {
+      var src = 'pet-app/skins/' + s.id + '.png';
+      if (skinImg.getAttribute('src') !== src) skinImg.src = src;
+      skinName.textContent = s.name;
+      skinRarity.textContent = s.rarity ? s.rarity + ' 级稀有度' : '';
+    }
+    pet.style.setProperty('--skin', s.theme);
+    try { localStorage.setItem('pet.skin', s.id); } catch (e) { /* ignore */ }
+    if (typeof syncMenu === 'function') syncMenu();
+    return s;
+  }
+  // 给桌面主进程和自动化测试用的开关
+  window.__setSkin = function (id) { return applySkin(id).id; };
+  window.__getSkin = function () { return skinId; };
+
+  // 页内菜单（浏览器版）的皮肤格子
+  var msGrid = document.getElementById('msGrid');
+  if (msGrid) {
+    Object.keys(SKINS).forEach(function (k) {
+      var s = SKINS[k];
+      var d = document.createElement('i');
+      d.className = 'ms-dot';
+      d.setAttribute('data-skin', s.id);
+      d.title = s.name + (s.rarity ? ' · ' + s.rarity + ' 级' : '');
+      d.style.setProperty('--c', s.theme);
+      msGrid.appendChild(d);
+    });
+    msGrid.addEventListener('click', function (e) {
+      var d = e.target.closest('[data-skin]');
+      if (!d) return;
+      var s = applySkin(d.getAttribute('data-skin'));
+      say(s.id === 'robot' ? '变回经典机器人啦。' : '换上「' + s.name + '」！这台小机箱也跟着换了配色。');
+    });
+  }
+
+  // 桌面版：主进程是唯一真源（设置里存的皮肤，启动和切换都会推过来）
+  if (HOST && HOST.onSkin) {
+    HOST.onSkin(function (id) { applySkin(id); });
+  } else {
+    var savedSkin = null;
+    try { savedSkin = localStorage.getItem('pet.skin'); } catch (e) { /* ignore */ }
+    applySkin(savedSkin || 'robot');
+  }
+
+  /* ============ 右键菜单 ============ */
+  function syncMenu() {
+    menu.querySelector('[data-act="follow"]').textContent = following ? '停止跟随' : '跟随鼠标';
+    menu.querySelector('[data-act="top"]').textContent = alwaysTop ? '取消置顶' : '窗口置顶';
+    menu.querySelector('[data-act="tts"]').textContent = ttsOn ? '语音播报：开' : '语音播报：关';
+    if (msGrid) {
+      Array.prototype.forEach.call(msGrid.children, function (d) {
+        d.className = 'ms-dot' + (d.getAttribute('data-skin') === skinId ? ' sel' : '');
+      });
+    }
+  }
+  function showMenu(x, y) {
+    syncMenu();
+    menu.classList.add('show');
+    var r = menu.getBoundingClientRect();
+    menu.style.left = Math.min(x, innerWidth - r.width - 2) + 'px';
+    menu.style.top = Math.min(y, innerHeight - r.height - 2) + 'px';
+  }
+  function hideMenu() { menu.classList.remove('show'); }
+
+  menu.addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    var act = b.getAttribute('data-act');
+    hideMenu();
+    doAct(act);
+  });
+
+  addEventListener('pointerdown', function (e) {
+    if (!menu.contains(e.target)) hideMenu();
+  }, true);
+
+  // 桌面版用系统原生右键菜单（页内菜单常被小窗口裁掉一截）；浏览器版仍用页内菜单
+  pet.addEventListener('contextmenu', function (e) {
+    if (HOST && HOST.menu) {
+      e.preventDefault();
+      HOST.menu({ follow: following, top: alwaysTop, tts: ttsOn });
+    }
+  });
+
+  if (HOST && HOST.onMenuCmd) {
+    HOST.onMenuCmd(function (act) { doAct(String(act || '')); });
+  }
+
+  function doAct(act) {
+    if (act === 'follow') setFollow(!following);
+    else if (act === 'reset') resetPos();
+    else if (act === 'sys') {
+      // 机箱太小，负载详情去浏览器里看
+      if (HOST && HOST.hostCmd) { HOST.hostCmd('status'); say('浏览器里开了个大盘，曲线大得多。'); }
+      else sysReport();
+    }
+    else if (act === 'tts') {
+      ttsOn = !ttsOn;
+      try { localStorage.setItem('pet.tts', ttsOn ? '1' : '0'); } catch (e) { /* ignore */ }
+      syncMenu();
+      if (ttsOn) announce('好，我念给你听。'); else say('好，安静模式。');
+    }
+    else if (act === 'openapp') openApp('focus');
+    else if (act === 'note') openApp('note');
+    else if (act === 'ask') openApp('ask');
+    else if (act === 'quick') {
+      if (HOST && HOST.hostCmd) HOST.hostCmd('quicknote');
+      else say('网页版按不住系统快捷键，桌面版才有。');
+    }
+    else if (act === 'clip') {
+      if (HOST && HOST.hostCmd) HOST.hostCmd('clipboard');
+      else say('剪贴板快收只在桌面版有。');
+    }
+    else if (act === 'hide') {
+      if (HOST && HOST.hostCmd) HOST.hostCmd('hide');
+      else say('隐身只在桌面版有哦。');
+    }
+    else if (act === 'quit') { if (HOST) HOST.quit(); else say('网页版关掉标签页就行～'); }
+    else if (act === 'top') {
+      alwaysTop = !alwaysTop;
+      if (HOST) HOST.setAlwaysTop(alwaysTop);
+      syncMenu();
+      say(alwaysTop ? '一直浮在最上面～' : '好，可以躲到后面了。');
+    }
+  }
+
+  function resetPos() {
+    var b = visualBox();
+    pos.x = VIEW.x1 - b.ox - b.w - 8;
+    pos.y = VIEW.y1 - b.oy - b.h - 8;
+    clampPos();
+    applyPos();
+    say('回到角落。');
+  }
+
+  /* ============ 鼠标穿透判定（桌面模式） ============ */
+  var ctOn = true;
+  function hitTest(lx, ly) {
+    if (dragging || menu.classList.contains('show')) return true;
+    if (ly >= 224) return lx > 14 && lx < 150;              // 底部按钮条
+    var s = scaleNow();
+    var ux = 82 + (lx - 82) / s;                            // 逆缩放回机器人本体坐标
+    var uy = HEAD_ANCHOR_OY + (ly - HEAD_ANCHOR_OY) / s;
+    return ux >= 16 && ux <= 152 && uy >= 42 && uy <= 222;
+  }
+  function updateClickThrough(lx, ly) {
+    if (!HOST) return;
+    var want = !hitTest(lx, ly);
+    if (want !== ctOn) {
+      ctOn = want;
+      HOST.setClickThrough(ctOn);
+    }
+  }
+
+  /* ============ 启动 ============ */
+  function start(hostState) {
+    if (/ui/.test(location.hash)) {
+      pet.classList.add('force-ui');
+      setTimeout(function () { say('要不要摸摸头？'); }, 60);
+    }
+    if (hostState) {
+      VIEW.x0 = hostState.workArea.x;
+      VIEW.y0 = hostState.workArea.y;
+      VIEW.x1 = hostState.workArea.x + hostState.workArea.width;
+      VIEW.y1 = hostState.workArea.y + hostState.workArea.height;
+      pos.x = hostState.x;
+      pos.y = hostState.y;
+      mouse.x = pos.x + PET_W / 2;
+      mouse.y = pos.y + PET_H / 2;
+      hint.style.display = 'none';
+      pet.style.cursor = 'grab';
+    } else {
+      pos.x = innerWidth - 50 - PET_W;
+      pos.y = innerHeight - 60 - PET_H;
+      pet.style.right = 'auto';
+      pet.style.bottom = 'auto';
+      setTimeout(function () { hint.classList.add('fade'); }, 9000);
+      hint.addEventListener('pointerenter', function () { hint.classList.remove('fade'); });
+    }
+
+    pet.style.left = HOST ? '0px' : pos.x + 'px';
+    pet.style.top = HOST ? '0px' : pos.y + 'px';
+    if (!HOST) applyPos();
+
+    bindInteraction();
+    requestAnimationFrame(frame);
+    scheduleBlink();
+    scheduleChatter();
+
+    addEventListener('resize', function () {
+      if (HOST) return;
+      VIEW.x1 = innerWidth; VIEW.y1 = innerHeight;
+      clampPos();
+      applyPos();
+    });
+
+    pet.addEventListener('contextmenu', function (e) {
+      e.preventDefault();
+      // 桌面版交给系统原生菜单（上面的 HOST.menu 分支），这里再画一份会被小窗口裁掉
+      if (HOST && HOST.menu) return;
+      showMenu(e.clientX, e.clientY);
+    });
+
+    if (HOST) {
+      HOST.onCursor(function (p) {
+        // p.x / p.y 是窗口内坐标，p.sx / p.sy 是屏幕坐标。
+        // pos（窗口位置）是屏幕坐标，所以跟随和瞄准都要用屏幕坐标；
+        // 命中测试用的是窗口内坐标，别混用 —— 混用会导致它朝错误的方向跑。
+        mouse.x = (typeof p.sx === 'number') ? p.sx : pos.x + p.x;
+        mouse.y = (typeof p.sy === 'number') ? p.sy : pos.y + p.y;
+        updateClickThrough(p.x, p.y);
+        if (dragging) {
+          // 光标被屏幕边缘挡住太久就自动结束拖拽，避免卡在“抓着”的状态
+          if (p.x < -60 || p.y < -60 || p.x > PET_W + 60 || p.y > PET_H + 60) {
+            dragging = false;
+            pet.classList.remove('dragging');
+            return;
+          }
+          var nx = mouse.x - grab.x;
+          var ny = mouse.y - grab.y;
+          dragMoved += Math.abs(nx - pos.x) + Math.abs(ny - pos.y);
+          pos.x = nx; pos.y = ny;
+          clampPos();
+          applyPos();
+          resetFollowMotion();
+          return;
+        }
+        updateAim();
+      });
+      HOST.onFollow(function (v) { if (v !== following) setFollow(v); });
+      HOST.onTop(function (v) { alwaysTop = v; syncMenu(); });
+      HOST.onReset(resetPos);
+      HOST.onLink(onLink);
+      HOST.requestLink();
+      HOST.onSys(sysHandle);
+      setInterval(sysTick, 2000);
+      srvPaint(false);          // 先画个“--”，等第一帧采样到达再填数
+      if (HOST.onSay) HOST.onSay(function (t) { if (t) say(t); });
+      HOST.onDragEnd(function () {
+        if (dragging) { dragging = false; pet.classList.remove('dragging'); }
+      });
+    }
+  }
+
+  if (HOST) HOST.init(start);
+  else start(null);
+})();
+</script>
+</body>
+</html>

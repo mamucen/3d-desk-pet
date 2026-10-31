@@ -1,0 +1,1398 @@
+// 3D 桌面小机器人 · Electron 主进程
+// 透明无边框 + 置顶 + 不占任务栏 + 系统托盘常驻
+'use strict';
+
+const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell, globalShortcut, clipboard, desktopCapturer, dialog } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { createBridge } = require('./bridge');
+const { isFullscreenish } = require('./fullscreen');
+const { createOutbox } = require('./outbox');
+const { createWatcher, cleanTitle, listPendingSessions, markSessionSent, dropSession, adoptLegacySessions, noteSessionAttempt, MAX_TRIES } = require('./watch');
+const { buildReport } = require('./report');
+const bili = require('./bili');
+
+const WIN_W = 164;
+const WIN_H = 252;
+const QN_W = 460;      // 快捷输入条
+const QN_H = 62;
+
+// 信息管家线上地址（含分享码）。平台的分享链接必须带 sharecode，
+// 少了会被判定「链接不完整」直接 403，所以这里一定要带全。
+const DEFAULT_APP_URL = 'https://your-app-id.app.workbuddy.host/?sharecode=YOUR_SHARECODE';
+const DEFAULT_SHARECODE = (/(?:^|[?&])sharecode=([^&#]+)/.exec(DEFAULT_APP_URL) || [])[1] || '';
+
+// 只认信息管家的正式地址：*.workbuddy.host / *.workbuddy.cn（含 app.workbuddy.host），
+// 或本机调试的 localhost。早先版本收任何“带点的域名”，结果测试脚本里的占位域名
+// （info-keeper.example）趁测试运行时被推给了真机器人，还写进了缓存，
+// 点「记一条」就打开了打不开的假网址。这里直接白名单，一劳永逸。
+function pickUrl(u) {
+  if (typeof u !== 'string') return '';
+  const s = u.trim();
+  const m = /^(https?:\/\/[^\/\s?#]+)/i.exec(s);
+  if (!m) return '';
+  const host = m[1].replace(/^https?:\/\//i, '').split(':')[0].toLowerCase();
+  if (host === 'localhost') return s;
+  if (/(^|\.)workbuddy\.host$/.test(host)) return s;
+  if (/(^|\.)workbuddy\.cn$/.test(host)) return s;
+  return '';
+}
+
+// 白名单之外再补一道：分享链接缺 sharecode 会 403，这里自动补齐
+function appUrl(u) {
+  const s = pickUrl(u);
+  if (!s) return '';
+  if (/[?&]sharecode=/.test(s)) return s;
+  try {
+    const url = new URL(s);
+    if (!/(^|\.)workbuddy\.(host|cn)$/.test(url.hostname)) return s;
+    if (DEFAULT_SHARECODE) url.searchParams.set('sharecode', DEFAULT_SHARECODE);
+    return url.toString();
+  } catch (e) {
+    return s;
+  }
+}
+
+let win = null;
+let qnWin = null;
+let tray = null;
+let cursorTimer = null;
+let linkTimer = null;
+let bridge = null;
+let quitting = false;
+let restarting = false;
+
+/**
+ * 重启自己：改完代码不用去托盘里翻「退出」再双击。
+ * 先把 quitting 立起来，让 close 处理器放行；before-quit 里那套清理照常跑
+ * （定时器、陪看会话、桥接端口都会释放），然后由 Electron 拉一个新进程。
+ */
+function restartApp() {
+  if (restarting) return;
+  restarting = true;
+  quitting = true;
+  try {
+    // 开发态 argv 是 [electron.exe, 工程目录]，必须显式把目录带回去；
+    // 打包后原样重放启动参数。都追加 --relaunch 标记，让新进程知道“这是重启，值得等锁”。
+    const base = app.isPackaged ? process.argv.slice(1) : [app.getAppPath()];
+    app.relaunch({ execPath: process.execPath, args: base.concat(['--relaunch']) });
+  } catch (e) {
+    try { app.relaunch(); } catch (err) { /* 实在不行就只退出 */ }
+  }
+  app.quit();
+  // 兜底：万一有东西拦住退出，两秒后硬退（不然“重启”变成“卡住”）
+  setTimeout(() => { try { app.exit(0); } catch (e) { /* 忽略 */ } }, 2000);
+}
+
+const state = { follow: false, top: true };
+
+// 最近一次联动状态（离线时也保留，重启后先显示上次的数字）
+let link = { online: false, state: null, appUrl: DEFAULT_APP_URL };
+let stateFile = '';
+let settingsFile = '';
+const settings = { autoStart: false, autoHide: true, watchMode: true, skin: 'robot' };
+
+/* ---------- 皮肤 ---------- */
+const SKINS = [
+  { id: 'robot',   name: '经典机器人' },
+  { id: 'pixel',   name: '像素喵' },
+  { id: 'stellar', name: '星际喵' },
+  { id: 'rich',    name: '暴富喵' },
+  { id: 'camera',  name: '镜头喵' },
+  { id: 'pubg',    name: '和平精英喵' }
+];
+function applySkinChoice(id) {
+  if (!SKINS.some((s) => s.id === id)) id = 'robot';
+  settings.skin = id;
+  saveSettings();
+  if (win && !win.isDestroyed()) win.webContents.send('pet:skin', id);
+  if (tray) tray.setContextMenu(buildTrayMenu());
+}
+function skinSubmenu() {
+  return SKINS.map((s) => ({
+    label: s.name,
+    type: 'checkbox',
+    checked: (settings.skin || 'robot') === s.id,
+    click: () => applySkinChoice(s.id)
+  }));
+}
+
+/* ---------- 待同步队列（outbox） ----------
+   桌面记的东西先落盘，网页一打开就自动灌进去。
+   这样即使管家没开着，按 Ctrl+Alt+Space 记也不会丢。 */
+let outboxFile = '';
+let outbox = null;
+
+function loadOutbox() {
+  try {
+    outboxFile = path.join(app.getPath('userData'), 'outbox.json');
+  } catch (err) { outboxFile = ''; }
+  outbox = createOutbox(outboxFile);
+  outbox.load();
+  return outbox.list();
+}
+
+function outboxCount() { return outbox ? outbox.count() : 0; }
+
+/** 把还没送出去的条目推给网页（在线时才真的送） */
+function flushOutbox() {
+  if (!outbox || !bridge || !bridge.isOnline()) return false;
+  const todo = outbox.due();
+  if (!todo.length) return false;
+  outbox.markSent(todo);
+  return bridge.push({
+    cmd: 'ingest',
+    items: todo.map((x) => ({ id: x.id, text: x.text, at: x.at, tries: x.tries }))
+  });
+}
+
+/* ---------- 设置（开机自启 / 全屏隐身） ---------- */
+function loadSettings() {
+  try {
+    settingsFile = path.join(app.getPath('userData'), 'pet-settings.json');
+    if (fs.existsSync(settingsFile)) {
+      const raw = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+      if (raw && typeof raw === 'object') {
+        settings.autoStart = !!raw.autoStart;
+        if (typeof raw.autoHide === 'boolean') settings.autoHide = raw.autoHide;
+        if (typeof raw.watchMode === 'boolean') settings.watchMode = raw.watchMode;
+        if (typeof raw.skin === 'string' && raw.skin) settings.skin = raw.skin;
+      }
+    }
+  } catch (err) { /* 用默认值 */ }
+  // 以系统里真实的登录项为准，避免两边不一致
+  try {
+    const real = app.getLoginItemSettings();
+    if (real && typeof real.openAtLogin === 'boolean') settings.autoStart = real.openAtLogin;
+  } catch (err) { /* ignore */ }
+}
+
+function saveSettings() {
+  try {
+    if (settingsFile) fs.writeFileSync(settingsFile, JSON.stringify(settings));
+  } catch (err) { /* ignore */ }
+}
+
+function applyAutoStart(on) {
+  settings.autoStart = !!on;
+  try {
+    const opts = { openAtLogin: settings.autoStart };
+    if (!app.isPackaged) {
+      // 开发态（electron.exe 直接跑目录）要把应用目录带上，否则开机会开个空 Electron
+      opts.path = process.execPath;
+      opts.args = [path.resolve(__dirname, '..')];
+    }
+    app.setLoginItemSettings(opts);
+  } catch (err) { /* ignore */ }
+  saveSettings();
+}
+
+/* ---------- 找到渲染页面 ---------- */
+function findHtml() {
+  const cands = [
+    path.join(__dirname, 'renderer', 'robot-pet-3d.html'),
+    path.join(__dirname, '..', 'robot-pet-3d.html'),
+    path.join(__dirname, 'robot-pet-3d.html')
+  ];
+  for (const c of cands) {
+    try { if (fs.existsSync(c)) return c; } catch (e) { /* ignore */ }
+  }
+  return null;
+}
+
+/* ---------- 窗口 ---------- */
+function createWindow() {
+  const wa = screen.getPrimaryDisplay().workArea;
+  win = new BrowserWindow({
+    width: WIN_W,
+    height: WIN_H,
+    x: wa.x + wa.width - WIN_W - 48,
+    y: wa.y + wa.height - WIN_H - 48,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false,
+      backgroundThrottling: false   // 关键：失焦后动画照常跑，不会“反应变慢”
+    }
+  });
+
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // 默认鼠标穿透（forward 让渲染进程仍能拿到移动事件），悬停到机器人上时再打开
+  win.setIgnoreMouseEvents(true, { forward: true });
+
+  win.once('ready-to-show', () => win.show());
+
+  const html = findHtml();
+  if (html) win.loadFile(html);
+  else win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
+    '<body style="font-family:sans-serif"><h3>未找到 robot-pet-3d.html</h3><p>请把它放在 pet-app 同级目录。</p></body>'));
+
+  win.webContents.on('did-finish-load', () => {
+    const b = win.getBounds();
+    win.webContents.send('pet:init', {
+      x: b.x, y: b.y,
+      workArea: screen.getPrimaryDisplay().workArea
+    });
+    win.webContents.send('pet:link', link);
+    win.webContents.send('pet:skin', settings.skin || 'robot');
+
+    // 调试：PET_DEBUG_SHOT=毫秒数 时自动截一张渲染画面（默认 1800ms）
+    if (process.env.PET_DEBUG_SHOT) {
+      const delay = parseInt(process.env.PET_DEBUG_SHOT, 10) || 1800;
+      setTimeout(() => {
+        if (!win || win.isDestroyed()) return;
+        win.webContents.executeJavaScript(
+          'var b=document.getElementById("badge");' +
+          'var r=b.getBoundingClientRect();' +
+          'JSON.stringify({cls:b.className,num:document.getElementById("badgeNum").textContent,' +
+          'rect:[r.x,r.y,r.width,r.height],op:getComputedStyle(b).opacity})'
+        ).then((s) => console.log('[debug] badge:', s)).catch((e) => console.log('[debug] eval fail', e));
+        win.webContents.capturePage().then((img) => {
+          const out = path.join(__dirname, '..', '.shots', 'electron-render.png');
+          fs.writeFileSync(out, img.toPNG());
+          console.log('[debug] saved', out);
+        }).catch((err) => console.log('[debug] capture failed', err));
+      }, delay);
+    }
+  });
+
+  win.on('closed', () => { win = null; });
+
+  // 点 × 不退出：隐藏到托盘，真正退出走托盘菜单
+  win.on('close', (e) => {
+    if (!quitting) {
+      e.preventDefault();
+      win.hide();
+    }
+  });
+}
+
+function showWindow() {
+  if (!win || win.isDestroyed()) {
+    createWindow();
+  } else {
+    win.show();
+    win.focus();
+  }
+}
+
+/** 让机器人说一句话（气泡） */
+function petSay(text) {
+  if (win && !win.isDestroyed()) win.webContents.send('pet:say', String(text || ''));
+}
+
+/* ---------- 快捷输入条 ----------
+   Ctrl+Alt+Space 随手记一条；Ctrl+Alt+V 直接把剪贴板里的东西收进来。
+   条子贴在机器人头顶，回车存档、Esc 走人。 */
+function quickNotePos() {
+  const wa = screen.getPrimaryDisplay().workArea;
+  let cx, baseY;
+  if (win && !win.isDestroyed() && win.isVisible()) {
+    const b = win.getBounds();
+    cx = b.x + b.width / 2;
+    baseY = b.y;
+  } else {
+    const p = screen.getCursorScreenPoint();
+    cx = p.x;
+    baseY = p.y - 60;
+  }
+  let x = Math.round(cx - QN_W / 2);
+  let y = Math.round(baseY - QN_H - 8);
+  x = Math.max(wa.x + 8, Math.min(wa.x + wa.width - QN_W - 8, x));
+  if (y < wa.y + 8) y = Math.round(baseY + 220);
+  y = Math.max(wa.y + 8, Math.min(wa.y + wa.height - QN_H - 8, y));
+  return { x, y };
+}
+
+function openQuickNote(opts) {
+  const o = opts || {};
+  if (qnWin && !qnWin.isDestroyed()) {
+    const p = quickNotePos();
+    qnWin.setPosition(p.x, p.y);
+    qnWin.show();
+    qnWin.focus();
+    qnWin.webContents.send('qn:fill', { text: o.text || '', hint: o.hint || '', count: outboxCount() });
+    return;
+  }
+
+  const p = quickNotePos();
+  qnWin = new BrowserWindow({
+    width: QN_W,
+    height: QN_H,
+    x: p.x,
+    y: p.y,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'quicknote-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false
+    }
+  });
+  qnWin.setAlwaysOnTop(true, 'screen-saver');
+  qnWin.loadFile(path.join(__dirname, 'quicknote.html'));
+  qnWin.once('ready-to-show', () => {
+    if (!qnWin || qnWin.isDestroyed()) return;
+    qnWin.show();
+    qnWin.focus();
+    qnWin.webContents.send('qn:fill', { text: o.text || '', hint: o.hint || '', count: outboxCount() });
+  });
+  // 点到别处就收起，符合“随手记一下”的用法
+  qnWin.on('blur', () => closeQuickNote());
+  qnWin.on('closed', () => { qnWin = null; });
+}
+
+function closeQuickNote() {
+  if (qnWin && !qnWin.isDestroyed() && qnWin.isVisible()) qnWin.hide();
+}
+
+/** 剪贴板快收：有图优先存图，否则把文字预填进输入条让人确认 */
+function clipboardHarvest() {
+  let text = '';
+  try { text = clipboard.readText() || ''; } catch (e) { text = ''; }
+  const trimmed = text.trim();
+
+  if (!trimmed) {
+    let img = null;
+    try { img = clipboard.readImage(); } catch (e) { img = null; }
+    if (img && !img.isEmpty()) {
+      try {
+        const dir = path.join(app.getPath('userData'), 'clips');
+        fs.mkdirSync(dir, { recursive: true });
+        const file = path.join(dir, 'clip-' + new Date().toISOString().replace(/[:.]/g, '-') + '.png');
+        fs.writeFileSync(file, img.toPNG());
+        petSay('截图收到，存在 clips\\' + path.basename(file));
+        try { shell.showItemInFolder(file); } catch (e) { /* ignore */ }
+        return;
+      } catch (err) {
+        petSay('截图存不下来：' + (err.message || '写入失败'));
+        return;
+      }
+    }
+    petSay('剪贴板是空的，先复制点东西？');
+    return;
+  }
+
+  openQuickNote({ text: trimmed.slice(0, 2000), hint: '来自剪贴板 · 回车存档' });
+}
+
+/** 系统负载：机箱面板太小，浏览器里看曲线才过瘾 */
+function openStatusPage() {
+  const port = bridge && bridge.getPort();
+  if (!port) { petSay('本地服务还没起来，先看看机箱面板吧。'); return; }
+  try { shell.openExternal('http://127.0.0.1:' + port + '/status'); } catch (e) { /* 忽略 */ }
+}
+
+/* ---------- 全屏自动隐身 ----------
+   判据：应用真全屏时任务栏被盖住 → workArea 等于屏幕 bounds。
+   若系统本来就开着“任务栏自动隐藏”，这个判据失效，自动降级为只用快捷键。 */
+let fsTimer = null;
+let fsHideAt = 0;
+let fsHidden = false;
+let fsUsable = true;
+let manualHidden = false;
+
+function setFsHidden(on) {
+  fsHidden = !!on;
+  if (!win || win.isDestroyed()) return;
+  if (fsHidden) win.hide();
+  else if (!manualHidden) win.showInactive();
+  if (tray) tray.setContextMenu(buildTrayMenu());
+}
+
+function toggleManualHide() {
+  manualHidden = !manualHidden;
+  if (!win || win.isDestroyed()) return;
+  if (manualHidden) win.hide();
+  else win.showInactive();
+  if (tray) tray.setContextMenu(buildTrayMenu());
+}
+
+function startFullscreenWatch() {
+  const d = screen.getPrimaryDisplay();
+  fsUsable = !isFullscreenish(d.workArea, d.bounds);
+  if (!fsUsable) console.log('[fullscreen] 任务栏常隐，自动隐身判据不可用，改用 Ctrl+Alt+H');
+
+  fsTimer = setInterval(() => {
+    if (!win || win.isDestroyed()) return;
+    if (!fsUsable || !settings.autoHide) {
+      if (fsHidden) setFsHidden(false);
+      return;
+    }
+    if (manualHidden) return;
+
+    const dd = screen.getPrimaryDisplay();
+    const full = isFullscreenish(dd.workArea, dd.bounds);
+    if (full) {
+      if (!fsHideAt) fsHideAt = Date.now();
+      if (!fsHidden && Date.now() - fsHideAt > 1500) setFsHidden(true);   // 抖一下就切走的不算
+    } else {
+      fsHideAt = 0;
+      if (fsHidden) setFsHidden(false);
+    }
+  }, 1000);
+}
+
+/* ---------- 系统负载采样（CPU / 内存，供机器人“说出来”） ---------- */
+function readCpuTimes() {
+  const cpus = os.cpus() || [];
+  let idle = 0, total = 0, cores = [];
+  for (const c of cpus) {
+    const t = c.times;
+    if (!t) continue;
+    const sum = t.user + t.nice + t.sys + t.idle + t.irq;
+    idle += t.idle; total += sum;
+    cores.push({ sum, idle: t.idle });
+  }
+  return { idle, total, cores, count: cpus.length };
+}
+
+let sysPrev = null, sysTimer = null;
+const sysHistory = [];        // 最近的系统采样，给浏览器版监控页画曲线用
+let lastSys = null;
+
+function sampleSys() {
+  const cur = readCpuTimes();
+  if (!cur.total) return null;
+  if (!sysPrev) { sysPrev = cur; return null; }
+  const dTotal = cur.total - sysPrev.total;
+  const dIdle = cur.idle - sysPrev.idle;
+  // 单核占用：看最忙的那个核（多线程程序更容易顶满单核）
+  let coreMax = 0;
+  if (sysPrev.cores.length === cur.cores.length) {
+    for (let i = 0; i < cur.cores.length; i++) {
+      const ds = cur.cores[i].sum - sysPrev.cores[i].sum;
+      const di = cur.cores[i].idle - sysPrev.cores[i].idle;
+      if (ds > 0) coreMax = Math.max(coreMax, (1 - di / ds) * 100);
+    }
+  }
+  sysPrev = cur;
+  if (dTotal <= 0) return null;
+
+  const totalMem = os.totalmem(), freeMem = os.freemem();
+  return {
+    cpu: Math.round(Math.max(0, Math.min(100, (1 - dIdle / dTotal) * 100))),
+    coreMax: Math.round(Math.max(0, Math.min(100, coreMax))),
+    mem: Math.round(Math.max(0, Math.min(100, (1 - freeMem / totalMem) * 100))),
+    cores: cur.count,
+    uptime: Math.round(os.uptime()),
+    ts: Date.now()
+  };
+}
+
+function startSysLoop() {
+  sysTimer = setInterval(() => {
+    if (!win || win.isDestroyed()) return;
+    const s = sampleSys();
+    if (s) {
+      sysHistory.push(s);
+      if (sysHistory.length > 120) sysHistory.shift();
+      lastSys = s;
+      win.webContents.send('pet:sys', s);
+    }
+  }, 700);   // 700ms 一帧，机箱面板上的曲线/数字才是“实时”的
+}
+
+/* ---------- 光标轮询（60Hz） ---------- */
+function startCursorLoop() {
+  cursorTimer = setInterval(() => {
+    if (!win || win.isDestroyed()) return;
+    try {
+      const p = screen.getCursorScreenPoint();
+      const b = win.getBounds();
+      win.webContents.send('pet:cursor', {
+        x: p.x - b.x, y: p.y - b.y, sx: p.x, sy: p.y
+      });
+    } catch (e) { /* ignore */ }
+  }, 16);
+}
+
+/* ---------- 联动：状态缓存到本地，重启后先显示上次的数字 ---------- */
+function loadLinkCache() {
+  try {
+    stateFile = path.join(app.getPath('userData'), 'link-state.json');
+    if (fs.existsSync(stateFile)) {
+      const raw = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      if (raw && raw.state) link.state = raw.state;
+      const cached = appUrl(raw && raw.appUrl);
+      if (cached) {
+        link.appUrl = cached;
+      } else {
+        link.appUrl = DEFAULT_APP_URL;
+        saveLinkCache();                     // 顺手把坏地址洗掉
+      }
+    }
+  } catch (err) { /* 缓存坏了不影响启动 */ }
+}
+
+function saveLinkCache() {
+  try {
+    if (!stateFile) return;
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: link.state, appUrl: link.appUrl, ts: Date.now()
+    }));
+  } catch (err) { /* ignore */ }
+}
+
+function broadcastLink() {
+  if (win && !win.isDestroyed()) win.webContents.send('pet:link', link);
+  if (tray) {
+    const s = link.state || {};
+    const bits = [];
+    if (link.online) {
+      if (s.todos) bits.push(s.todos + ' 件待办');
+      if (s.overdue) bits.push(s.overdue + ' 件逾期');
+      tray.setToolTip('3D 小机器人 · ' + (bits.length ? bits.join('，') : '信息管家已连接'));
+    } else {
+      tray.setToolTip('3D 小机器人 · 信息管家未连接');
+    }
+  }
+}
+
+function openApp(cmd) {
+  const online = bridge && bridge.isOnline();
+  if (online) {
+    bridge.push(cmd || 'focus');
+    showWindow();
+    return;
+  }
+  // 网页没开：直接把信息管家打开
+  const url = appUrl(bridge && bridge.getAppUrl()) || appUrl(link.appUrl) || DEFAULT_APP_URL;
+  try { shell.openExternal(url); } catch (err) { /* ignore */ }
+}
+
+/* ---------- 联动：接收网页推送的状态 ---------- */
+let menuKey = '';
+
+function handleLinkState(payload) {
+  const prev = link;
+  link = {
+    online: !!payload.online,
+    state: payload.state || prev.state,
+    appUrl: appUrl(payload.appUrl) || prev.appUrl
+  };
+
+  const s = link.state || {};
+  const key = [link.online, s.todos, s.overdue, s.today].join('|');
+  if (key !== menuKey) {
+    menuKey = key;
+    if (tray) tray.setContextMenu(buildTrayMenu());
+  }
+
+  if (payload.online) saveLinkCache();
+
+  // 网页回执：这几条已经落库了，从待同步队列里划掉
+  if (payload.acked && payload.acked.length && outbox) {
+    const n = outbox.ack(payload.acked);
+    if (n) petSay(n === 1 ? '已经归到管家收件箱了。' : ('刚记的 ' + n + ' 条都已入库。'));
+  }
+
+  // 网页刚连上（或一直在线）：把攒着的桌面记录灌进去，顺便补上没分析的陪看会话
+  if (payload.online) {
+    setTimeout(flushOutbox, payload.changed ? 400 : 0);
+    setTimeout(flushWatchPending, payload.changed ? 900 : 300);
+  }
+
+  broadcastLink();
+}
+
+/* ---------- 陪看模式 ----------
+   发现「标题像视频页」的 B 站窗口就自动采帧，看完把截图交给管家的 AI 出观点，
+   再生成一份 PPT 报告落到 D 盘。Ctrl+Alt+B 或托盘可随时关。 */
+let watchTimer = null;
+let watcher = null;
+let lastWatchDir = '';
+const pendingWatch = {};       // sid -> 会话（等网页分析结果回来出报告）
+const reportingWatch = {};     // sid -> 正在出报告（这段时间别重复送分析，白烧 token）
+const watchAckTimers = {};     // sid -> 「等回音」的超时计时器
+const WATCH_ACK_MS = 150000;   // 送出去最多等 2.5 分钟；等不到就重来（网页可能根本没开）
+
+/** 报告放哪：优先 D 盘；盘符不存在（换机器 / 拔了移动硬盘）就退回桌面，绝不因此写不出文件 */
+function reportRoot() {
+  // 想换到别的盘就设 PET_REPORT_ROOT（也方便测试）
+  const custom = process.env.PET_REPORT_ROOT;
+  if (custom) return custom;
+  try {
+    if (fs.existsSync('D:\\')) return 'D:\\';
+  } catch (e) { /* 忽略 */ }
+  return app.getPath('desktop');
+}
+
+/** 报告固定落这里，跟「有没有生成过」无关 —— 没生成过也能打开看看 */
+function reportDir() {
+  return path.join(reportRoot(), '陪看报告');
+}
+
+/** 说人话的位置描述，跟着实际盘符走 */
+function reportWhere() {
+  const root = reportRoot().replace(/[\\/]+$/, '');
+  if (/^[A-Za-z]:$/.test(root)) return root.slice(0, 1).toUpperCase() + ' 盘的「陪看报告」';
+  try {
+    if (root === app.getPath('desktop').replace(/[\\/]+$/, '')) return '桌面的「陪看报告」';
+  } catch (e) { /* 忽略 */ }
+  return '「' + root + '」里的陪看报告';
+}
+
+/** 数一下已经生成了几份报告（一份 = 一个 pptx） */
+function reportCount(dir) {
+  const d = dir || reportDir();
+  try {
+    return fs.readdirSync(d).filter((n) => /\.pptx$/i.test(n)).length;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * 打开陪看报告。文件夹不存在就建出来；
+ * 一份都还没有的话，顺手说一句，别让用户对着一片空白发愣。
+ */
+function openWatchReports() {
+  const dir = reportDir();
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* 忽略 */ }
+  const n = reportCount(dir);
+  lastWatchDir = dir;
+  try {
+    const err = shell.openPath(dir);
+    if (err && typeof err.then === 'function') err.catch(() => {});
+  } catch (e) { /* 忽略 */ }
+  if (!n) petSay('还没生成过报告，看完一个 B 站视频就有了。');
+  else petSay('报告在' + reportWhere() + '里，一共 ' + n + ' 份。');
+}
+
+/** 菜单项文案：没报告也能点，别灰着 */
+function watchReportItem() {
+  const n = reportCount();
+  return {
+    label: n ? '打开陪看报告（' + n + ' 份）' : '打开陪看报告文件夹',
+    click: () => openWatchReports()
+  };
+}
+
+/** 最新一份报告（按修改时间，双击就能打开） */
+function latestReportFile() {
+  const dir = reportDir();
+  try {
+    const files = fs.readdirSync(dir)
+      .filter((n) => /\.pptx$/i.test(n))
+      .map((n) => {
+        const p = path.join(dir, n);
+        let t = 0;
+        try { t = fs.statSync(p).mtimeMs; } catch (e) { /* 忽略 */ }
+        return { p, t };
+      })
+      .sort((a, b) => b.t - a.t);
+    return files[0] ? files[0].p : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+/** 「打开最新报告」：一键直达，不用先进文件夹翻 */
+function openLatestReport() {
+  const file = latestReportFile();
+  if (!file) {
+    petSay('还没有报告，看完一个 B 站视频我就给你做一份。');
+    openWatchReports();
+    return;
+  }
+  try { shell.openPath(file); } catch (e) { /* 忽略 */ }
+  petSay('给你打开最近这份：' + path.basename(file).replace(/\.[a-z0-9]+$/i, ''));
+}
+
+/** 菜单项：有报告才可点，标题直接写进菜单，不用点开才知道是哪一份 */
+function latestReportItem() {
+  const file = latestReportFile();
+  let label = '打开最新一份报告（还没有）';
+  if (file) {
+    const name = path.basename(file).replace(/^\d{4}-\d{2}-\d{2}-/, '').replace(/\.pptx$/i, '');
+    label = '打开最新报告：' + (name.length > 14 ? name.slice(0, 14) + '…' : name);
+  }
+  return {
+    label,
+    enabled: !!file,
+    click: () => openLatestReport()
+  };
+}
+
+/* ---------- 报告占了多少地方 / 一键清理 ---------- */
+
+function fmtBytes(b) {
+  const v = Number(b) || 0;
+  if (v >= 1024 * 1024 * 1024) return (v / 1024 / 1024 / 1024).toFixed(1) + ' GB';
+  if (v >= 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB';
+  if (v >= 1024) return Math.round(v / 1024) + ' KB';
+  return v + ' B';
+}
+
+/** 报告目录的份数和体积（按 pptx 算，一份 = 一个文件） */
+function reportStats() {
+  const dir = reportDir();
+  let count = 0;
+  let bytes = 0;
+  try {
+    fs.readdirSync(dir).filter((n) => /\.pptx$/i.test(n)).forEach((n) => {
+      count += 1;
+      try { bytes += fs.statSync(path.join(dir, n)).size; } catch (e) { /* 忽略 */ }
+    });
+  } catch (e) { /* 目录还不存在 */ }
+  return { count, bytes };
+}
+
+/** 报告列表：新的在前 */
+function reportFiles() {
+  const dir = reportDir();
+  try {
+    return fs.readdirSync(dir)
+      .filter((n) => /\.pptx$/i.test(n))
+      .map((n) => {
+        const p = path.join(dir, n);
+        let t = 0;
+        try { t = fs.statSync(p).mtimeMs; } catch (e) { /* 忽略 */ }
+        return { p, t };
+      })
+      .sort((a, b) => b.t - a.t);
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * 一键清理：看几个视频试功能留下的报告，手动去文件夹删太麻烦。
+ * 一律走回收站（shell.trashItem），万一删错了还能捞回来；不硬删。
+ */
+async function cleanReports() {
+  const st = reportStats();
+  if (!st.count) {
+    petSay('报告文件夹本来就是空的，不用清。');
+    return;
+  }
+  let choice = 2;
+  try {
+    const r = await dialog.showMessageBox({
+      type: 'question',
+      buttons: ['只留最近 3 份', '全部清掉', '取消'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      title: '清理陪看报告',
+      message: '现在有 ' + st.count + ' 份报告，占 ' + fmtBytes(st.bytes) + '。',
+      detail: '删掉的文件会进回收站，误删还能捞回来。'
+    });
+    choice = r && typeof r.response === 'number' ? r.response : 2;
+  } catch (e) {
+    return;
+  }
+  if (choice === 2) return;
+
+  const keep = choice === 0 ? 3 : 0;
+  const drop = reportFiles().slice(keep);
+  let done = 0;
+  for (const f of drop) {
+    try {
+      await shell.trashItem(f.p);
+      done += 1;
+    } catch (e) { /* 单个失败不影响其它 */ }
+  }
+  if (tray) tray.setContextMenu(buildTrayMenu());
+  refreshTrayTip();
+  if (!done) petSay('一份都没删掉，可能被别的程序占着。');
+  else petSay('清掉了 ' + done + ' 份报告（在回收站里），剩下的还在' + reportWhere() + '。');
+}
+
+/** 菜单项：直接显示「几份 · 多大」，嫌占地方的时候一眼就知道要不要清 */
+function reportCleanItem() {
+  const st = reportStats();
+  return {
+    label: st.count ? '清理陪看报告（' + st.count + ' 份 · ' + fmtBytes(st.bytes) + '）' : '清理陪看报告（空的）',
+    enabled: st.count > 0,
+    click: () => { cleanReports().catch(() => {}); }
+  };
+}
+
+function onWatchEvent(ev, payload) {
+  if (ev === 'start') {
+    petSay('陪你看《' + payload.title + '》，看完我给你个说法。');
+    refreshTrayTip();
+  } else if (ev === 'end') {
+    refreshTrayTip();
+    enqueueWatch(payload);
+  }
+}
+
+/** 托盘悬停提示：看一眼就知道它现在在陪看什么 */
+function refreshTrayTip() {
+  if (!tray) return;
+  const st = watcher && watcher.status();
+  try {
+    tray.setToolTip(st ? '正在陪看：' + st.title + '（已记 ' + st.frames + ' 帧）' : '3D 小机器人 · 待命');
+  } catch (e) { /* 忽略 */ }
+}
+
+/** 去 B 站把标题对成视频，拿详情和弹幕 —— 失败就算了，还能靠截图 */
+async function enrichBili(title) {
+  try {
+    const got = await Promise.race([
+      bili.enrich(title, { danmaku: true, maxSamples: 40 }),
+      new Promise((r) => setTimeout(() => r(null), 12000))
+    ]);
+    return got;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function enqueueWatch(session) {
+  session.bili = await enrichBili(session.title);
+  if (session.bili && session.bili.ok) {
+    session.bvid = session.bili.bvid;
+    const b = session.bili;
+    const dm = b.danmaku && b.danmaku.total;
+    // 认出来了就报个「证据」，让它看起来真是看过而不是瞎猜
+    petSay('认出来了，UP 主是' + (b.info.owner || '谁不知道') + (dm ? '，这场有 ' + dm + ' 条弹幕' : '') + '，我照着这些说观点。');
+  }
+  sendWatchForAnalysis(session);
+}
+
+const MAX_AI_FRAMES = 12;                  // 一次最多送几张给模型（再多也没用，纯烧 token）
+const MAX_AI_BYTES = 6 * 1024 * 1024;      // base64 总量上限，超了就少送几张
+
+function pickEven(list, n) {
+  if (list.length <= n) return list;
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(list[Math.round((i * (list.length - 1)) / (n - 1))]);
+  return out;
+}
+
+function watchRoot() {
+  return path.join(app.getPath('userData'), 'watch');
+}
+
+/** 内存里的帧直接有 base64；从磁盘补发的会话只有文件路径，这里现压一张出来 */
+function frameBase64(f) {
+  if (f.ai) return f.ai;
+  try {
+    const img = nativeImage.createFromPath(f.file);
+    if (!img || img.isEmpty()) return '';
+    return img.resize({ width: 720, quality: 'good' }).toJPEG(58).toString('base64');
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * 分析这一步是在管家的网页里调云端大模型做的，桌面端自己算不了。
+ * 所以网页没开着的时候，光攒素材是永远出不来报告的 ——
+ * 这里干脆把管家打开（十分钟最多开一次，别老抢焦点）。
+ */
+let lastAutoOpenAt = 0;
+function ensureHubForAnalysis() {
+  if (bridge && bridge.isOnline()) return true;
+  const now = Date.now();
+  if (now - lastAutoOpenAt < 10 * 60000) return false;
+  lastAutoOpenAt = now;
+  petSay('报告得靠管家里的 AI 来写，我把管家打开，它一连上我就把这几场补上。');
+  setTimeout(() => { try { openApp('focus'); } catch (e) { /* 忽略 */ } }, 600);
+  return false;
+}
+
+/**
+ * 送出去之后盯一段时间。
+ * 关键：以前这里是「发出去就改名成 sent」，网页要是没开着，这场就永久判死——
+ * 用户看了两轮视频，磁盘上躺着 7 场录像、一条报告都没有，就是这么来的。
+ * 现在改成「等回音」：等不到就还回去重试，试满 MAX_TRIES 次才认命（素材不删，能手动重来）。
+ */
+/** 放弃自动重试（只留素材），带一行日志，方便日后查「为什么这场没出报告」 */
+function giveUpWatch(id, why) {
+  console.log('[watch] 放弃自动重试 ' + id + '：' + why);
+  markSessionSent(watchRoot(), id);
+}
+
+function armWatchAck(session) {
+  clearTimeout(watchAckTimers[session.id]);
+  watchAckTimers[session.id] = setTimeout(() => {
+    delete watchAckTimers[session.id];
+    if (!pendingWatch[session.id]) return;              // 结果已经回来了
+    delete pendingWatch[session.id];
+    const tries = noteSessionAttempt(watchRoot(), session.id);
+    console.log('[watch] ' + session.id + ' 等回音超时，第 ' + tries + ' 次');
+    if (tries >= MAX_TRIES) {
+      giveUpWatch(session.id, '试了 ' + tries + ' 次没回音');
+      petSay('《' + (session.title || '这个视频') + '》试了 ' + tries + ' 次都没等到管家回话，素材我先收着，你点一下陪看就能再试。');
+      return;
+    }
+    petSay('这次分析没等到回音，我再试一次。');
+    setTimeout(flushWatchPending, 900);
+  }, WATCH_ACK_MS);
+}
+
+/**
+ * 把一场看完的视频送去分析。
+ * 发得出去就发；发不出去就留在 pendingWatch（内存）里，磁盘上那份 session.json 也没动，
+ * 管家一上线 / 程序下次启动都会自动补上。
+ */
+function sendWatchForAnalysis(session, opts) {
+  const o = opts || {};
+  if (!bridge || !bridge.isOnline()) {
+    const ids = Object.keys(pendingWatch);
+    if (ids.length >= 4) delete pendingWatch[ids[0]];
+    pendingWatch[session.id] = session;
+    if (!o.silent) ensureHubForAnalysis();
+    return false;
+  }
+  // 认出了 B 站视频就以文字为主（准），认不出就多给几张截图（瞎猜也比没有强）
+  const hasBili = !!(session.bili && session.bili.ok);
+  const biliText = hasBili ? bili.toPromptText(session.bili) : '';
+  const frameCap = hasBili ? 6 : MAX_AI_FRAMES;
+
+  const picked = pickEven(session.frames.filter((f) => frameBase64(f)), frameCap);
+  const frames = [];
+  let bytes = 0;
+  picked.forEach((f) => {
+    const ai = frameBase64(f);
+    if (!ai) return;
+    const data = 'data:image/jpeg;base64,' + ai;
+    if (bytes + data.length > MAX_AI_BYTES) return;
+    bytes += data.length;
+    frames.push({ i: f.i, data });
+  });
+  pendingWatch[session.id] = session;
+  armWatchAck(session);                              // 等回音；等不到会自动重来
+  const minutes = Math.max(1, Math.round(((session.endedAt || Date.now()) - session.startedAt) / 60000));
+  console.log('[watch] 送分析 ' + session.id + ' ' + session.frames.length + ' 帧 → ' + frames.length + ' 张，B站=' + (hasBili ? session.bvid : '没认出来'));
+  bridge.push({
+    cmd: 'watch-analyze',
+    sid: session.id,
+    title: session.title,
+    frames,
+    minutes,
+    bvid: session.bvid || '',
+    bili: biliText
+  });
+  if (!o.silent) petSay('看完了，正翻着画面想观点……');
+  return true;
+}
+
+/**
+ * 补发攒下的陪看会话。
+ * 以前这里是个坑：管家没开时只攒在内存里、永远不补发，程序一关就彻底丢了。
+ * 现在不管「刚连上」还是「重开程序」，都把磁盘上没发过的捞出来补上。
+ */
+let flushingWatch = false;
+async function flushWatchPending() {
+  if (flushingWatch || !bridge || !bridge.isOnline()) return 0;
+  flushingWatch = true;
+  let sent = 0;
+  try {
+    // 正在等回音 / 正在出报告的别重复发；试满次数的别再来（留着素材给用户手动重试）
+    const pending = listPendingSessions(watchRoot())
+      .filter((m) => !pendingWatch[m.id] && !reportingWatch[m.id] && (m.attempts || 0) < MAX_TRIES)
+      .slice(0, 2);                                                 // 一次最多补 2 场，别一口气怼上去
+    for (const meta of pending) {
+      if (!meta.bili) meta.bili = await enrichBili(meta.title);     // 补发时也去 B 站认一下
+      if (meta.bili && meta.bili.ok) meta.bvid = meta.bili.bvid;
+      if (!bridge.isOnline()) break;
+      if (sendWatchForAnalysis(meta, { silent: true })) sent += 1;
+    }
+    if (sent) petSay('补上之前看的那 ' + sent + ' 个视频，正在翻画面。');
+  } catch (err) {
+    /* 补发失败就算了，下次连上再试 */
+  }
+  flushingWatch = false;
+  return sent;
+}
+
+/** 托盘气泡：用户可能没盯着小机器人，报告好了要说一声 */
+function notifyDone(title, content) {
+  try {
+    if (tray && tray.displayBalloon) tray.displayBalloon({ title, content, iconType: 'info' });
+  } catch (e) { /* 系统禁了通知就算了，气泡里还会说 */ }
+}
+
+/** 结果回来时内存里可能没有这场了（程序刚重启过），从磁盘捞一把，别让报告白算 */
+function loadSessionMeta(id) {
+  const dir = path.join(watchRoot(), id);
+  for (const name of ['session.json', 'session.sent.json']) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      if (meta && Array.isArray(meta.frames)) { meta.dir = dir; return meta; }
+    } catch (e) { /* 换下一个 */ }
+  }
+  return null;
+}
+
+function handleWatchResult(w) {
+  const session = pendingWatch[w.sid] || loadSessionMeta(w.sid);
+  clearTimeout(watchAckTimers[w.sid]);
+  delete watchAckTimers[w.sid];
+  delete pendingWatch[w.sid];
+  console.log('[watch] 收到分析结果 ' + w.sid + (w.result ? '（有内容）' : '（空的）'));
+  if (!session) return;
+  if (!w.result) {
+    const tries = noteSessionAttempt(watchRoot(), w.sid);
+    if (tries >= MAX_TRIES) {
+      giveUpWatch(w.sid, '分析返回空，已试 ' + tries + ' 次');
+      petSay('《' + (session.title || '这个视频') + '》这次确实没分析成，素材我留着，你点一下陪看可以再试。');
+      return;
+    }
+    petSay('这个视频这次没分析成，我过一会儿再试一次。');
+    setTimeout(flushWatchPending, 2000);      // 队列里还有别的就继续
+    return;
+  }
+
+  const outDir = reportDir();
+  reportingWatch[w.sid] = true;                       // 出报告期间别再重复送这场
+  buildReport(session, w.result, outDir).then((files) => {
+    lastWatchDir = outDir;
+    const where = reportWhere();
+    if (files.pptx) {
+      // 明确告诉用户「分析完了 + 东西在哪」——之前只说结果，用户根本没注意到
+      const sc = Number(w.result && w.result.rating);
+      const scoreBit = isFinite(sc) && sc > 0 ? '我给它 ' + sc.toFixed(1) + ' 分，' : '';
+      petSay('《' + (session.title || '这个视频') + '》分析完了！' + scoreBit + 'PPT 报告已经放到' + where + '，Ctrl+Alt+L 直接打开。');
+      notifyDone('陪看报告好了', '《' + (session.title || 'B 站视频') + '》的观点已存到 ' + where);
+      dropSession(watchRoot(), session.id);
+      setTimeout(flushWatchPending, 1500);    // 队列里还有别的就继续
+    } else {
+      petSay('报告没生成出来，本地素材还留着，再点一次陪看可以重试。');
+    }
+    delete reportingWatch[w.sid];
+    if (tray) tray.setContextMenu(buildTrayMenu());
+  }).catch((err) => {
+    delete reportingWatch[w.sid];
+    petSay('报告生成失败：' + (err.message || '未知错误'));
+  });
+}
+
+function startWatchLoop() {
+  // 老版本只存了 jpg 没存元数据，这些录像一直没人分析 —— 先认领回来（最多 3 场）
+  try {
+    const adopted = adoptLegacySessions(watchRoot(), 3);
+    if (adopted) console.log('[watch] 认领了 ' + adopted + ' 场旧录像，等管家上线补分析');
+  } catch (e) { /* 忽略 */ }
+  try {
+    watcher = createWatcher({
+      // 两段式：不采样的拍子只要窗口名（thumbnailSize 0x0 = 不让系统生成任何位图）；
+      // 真到采样点才按 960x540 抓一次。这样挂在后台时基本不占 CPU/内存。
+      capture: async (o) => {
+        const wantThumbs = !!(o && o.thumbnails);
+        const sources = await desktopCapturer.getSources({
+          types: ['window'],
+          thumbnailSize: wantThumbs ? { width: 960, height: 540 } : { width: 0, height: 0 },
+          fetchWindowIcons: false
+        });
+        return sources.map((s) => ({ id: s.id, name: s.name, thumbnail: s.thumbnail }));
+      },
+      dir: watchRoot(),
+      onEvent: onWatchEvent
+    });
+  } catch (err) {
+    watcher = null;
+    console.log('[watch] init failed:', err.message);
+    return;
+  }
+  watchTimer = setInterval(() => {
+    if (!settings.watchMode || !watcher) return;
+    watcher.tick().then(() => refreshTrayTip()).catch(() => { /* 单次轮询失败不算什么 */ });
+  }, 3000);
+}
+
+function toggleWatch() {
+  settings.watchMode = !settings.watchMode;
+  saveSettings();
+  if (!settings.watchMode && watcher) watcher.stop('manual');
+  petSay(settings.watchMode ? '好，陪看模式开了，发现你在看 B 站我就记。' : '陪看模式关了，不盯了。');
+  if (tray) tray.setContextMenu(buildTrayMenu());
+}
+
+/* ---------- 托盘 ---------- */
+function buildTrayMenu() {
+  const s = link.state || {};
+  const status = link.online
+    ? '信息管家：已连接' + (s.todos ? '（' + s.todos + ' 件待办）' : '')
+    : '信息管家：未连接';
+  const pendingTip = outboxCount() ? { label: '待同步到管家：' + outboxCount() + ' 条', enabled: false } : null;
+  const items = [
+    { label: status, enabled: false }
+  ];
+  if (pendingTip) items.push(pendingTip);
+  items.push(
+    { type: 'separator' },
+    { label: '显示小机器人',
+      click: () => { manualHidden = false; showWindow(); } },
+    { label: '打开信息管家',
+      click: () => openApp('focus') },
+    { label: '快速记一条（Ctrl+Alt+Space）',
+      click: () => openQuickNote() },
+    { label: '收下剪贴板（Ctrl+Alt+V）',
+      click: () => clipboardHarvest() },
+    { label: '系统负载面板（浏览器）',
+      click: () => openStatusPage() },
+    { label: '陪看模式（看 B 站时自动记录）', type: 'checkbox', checked: settings.watchMode,
+      click: () => toggleWatch() },
+    watchReportItem(),
+    latestReportItem(),
+    reportCleanItem(),
+    { type: 'separator' },
+    { label: '跟随鼠标（Ctrl+Alt+F）', type: 'checkbox', checked: state.follow,
+      click: () => { if (win) win.webContents.send('pet:follow', !state.follow); } },
+    { label: '窗口置顶', type: 'checkbox', checked: state.top,
+      click: (it) => {
+        state.top = it.checked;
+        if (win) win.setAlwaysOnTop(it.checked, 'screen-saver');
+        if (win) win.webContents.send('pet:top', it.checked);
+      } },
+    { label: '回到右下角',
+      click: () => { if (win) win.webContents.send('pet:reset'); } },
+    { label: '皮肤', submenu: skinSubmenu() },
+    { label: '全屏时自动隐身' + (fsUsable ? '' : '（本机不可用）'), type: 'checkbox',
+      checked: settings.autoHide, enabled: fsUsable,
+      click: (it) => {
+        settings.autoHide = it.checked;
+        saveSettings();
+        if (!it.checked && fsHidden) setFsHidden(false);
+      } },
+    { label: '开机自启', type: 'checkbox', checked: settings.autoStart,
+      click: (it) => { applyAutoStart(it.checked); if (tray) tray.setContextMenu(buildTrayMenu()); } },
+    { type: 'separator' },
+    { label: '重启小机器人（Ctrl+Alt+R）', click: () => restartApp() },
+    { label: '退出', click: () => { quitting = true; app.quit(); } }
+  );
+  return Menu.buildFromTemplate(items);
+}
+
+function createTray() {
+  const iconPath = path.join(__dirname, 'tray.png');
+  let icon = nativeImage.createFromPath(iconPath);
+  if (icon.isEmpty()) icon = nativeImage.createEmpty();
+  tray = new Tray(icon);
+  tray.setToolTip('3D 小机器人');
+  tray.setContextMenu(buildTrayMenu());
+  tray.on('click', () => showWindow());
+}
+
+/* ---------- IPC ---------- */
+ipcMain.on('pet:move', (e, x, y) => {
+  if (!win || win.isDestroyed()) return;
+  const xi = Math.round(Number(x) || 0);
+  const yi = Math.round(Number(y) || 0);
+  const b = win.getBounds();
+  if (b.x !== xi || b.y !== yi) win.setPosition(xi, yi);
+});
+
+ipcMain.on('pet:clickthrough', (e, v) => {
+  if (!win || win.isDestroyed()) return;
+  try { win.setIgnoreMouseEvents(!!v, { forward: !!v }); } catch (err) { /* ignore */ }
+});
+
+ipcMain.on('pet:follow-state', (e, v) => {
+  state.follow = !!v;
+  if (tray) tray.setContextMenu(buildTrayMenu());
+});
+
+ipcMain.on('pet:always-top', (e, v) => {
+  state.top = !!v;
+  if (win) win.setAlwaysOnTop(state.top, 'screen-saver');
+  if (tray) tray.setContextMenu(buildTrayMenu());
+});
+
+ipcMain.on('pet:quit', () => { quitting = true; app.quit(); });
+
+/* ---------- 联动 IPC ---------- */
+ipcMain.on('pet:link-request', () => broadcastLink());
+
+ipcMain.on('pet:link-cmd', (e, cmd) => {
+  openApp(typeof cmd === 'string' ? cmd : 'focus');
+});
+
+/* ---------- 快捷输入条 IPC ---------- */
+ipcMain.on('qn:submit', (e, text) => {
+  const item = outbox && outbox.add(text);
+  if (!item) {
+    if (qnWin && !qnWin.isDestroyed()) qnWin.webContents.send('qn:error', '写点什么再回车');
+    return;
+  }
+  const sent = flushOutbox();
+  if (qnWin && !qnWin.isDestroyed()) {
+    qnWin.webContents.send('qn:ok', { queued: outboxCount(), sent: sent });
+  }
+  petSay(sent ? '记下了，正送进管家…' : ('记下了，等管家打开就同步（攒着 ' + outboxCount() + ' 条）'));
+});
+
+ipcMain.on('qn:hide', () => closeQuickNote());
+
+/* ---------- 桌宠右下角菜单触发的桌面动作 ---------- */
+ipcMain.on('pet:host-cmd', (e, name) => {
+  if (name === 'quicknote') openQuickNote();
+  else if (name === 'clipboard') clipboardHarvest();
+  else if (name === 'hide') toggleManualHide();
+  else if (name === 'watch') toggleWatch();
+  else if (name === 'status') openStatusPage();
+  else if (name === 'latest') openLatestReport();
+  else if (name === 'clean') cleanReports().catch(() => {});
+  else if (name === 'restart') restartApp();
+  else if (name === 'ask') openApp('ask');
+});
+
+/* ---------- 原生右键菜单 ----------
+   小机器人窗口只有 164x252，页内菜单经常被裁掉一截，索性用系统原生菜单 —— 永远完整。 */
+ipcMain.on('pet:menu', (e, st) => {
+  const s = st || {};
+  const send = (act) => { try { e.sender.send('pet:menu-cmd', act); } catch (err) { /* 忽略 */ } };
+  const items = [
+    { label: '随手记一条（Ctrl+Alt+Space）', click: () => openQuickNote() },
+    { label: '收下剪贴板（Ctrl+Alt+V）', click: () => clipboardHarvest() },
+    { label: '系统负载面板（浏览器）', click: () => openStatusPage() },
+    { type: 'separator' },
+    { label: '打开信息管家', click: () => send('openapp') },
+    { type: 'separator' },
+    { label: s.follow ? '停止跟随' : '跟随鼠标', click: () => send('follow') },
+    { label: s.tts ? '语音播报：开' : '语音播报：关', click: () => send('tts') },
+    { label: s.top ? '取消置顶' : '窗口置顶', click: () => send('top') },
+    { label: '回到右下角', click: () => send('reset') },
+    { label: '隐身（Ctrl+Alt+H）', click: () => toggleManualHide() },
+    { label: '皮肤', submenu: skinSubmenu() },
+    { type: 'separator' },
+    { label: '陪看模式（看 B 站时自动记录）', type: 'checkbox', checked: settings.watchMode, click: () => toggleWatch() },
+    watchReportItem(),
+    latestReportItem(),
+    reportCleanItem(),
+    { type: 'separator' },
+    { label: '重启小机器人（Ctrl+Alt+R）', click: () => restartApp() },
+    { label: '退出', click: () => send('quit') }
+  ];
+  try { Menu.buildFromTemplate(items).popup({ window: win && !win.isDestroyed() ? win : undefined }); } catch (err) { /* 忽略 */ }
+});
+
+/* ---------- 生命周期 ---------- */
+let booted = false;
+function boot() {
+  if (booted) return;
+  booted = true;
+
+  app.on('second-instance', () => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.show();
+    }
+  });
+
+  // 诊断用：桌宠要是自己没了，日志里得留下原因（渲染进程崩溃 / 被系统回收 都不是无迹可寻）
+  app.on('render-process-gone', (e, wc, d) => console.log('[life] 渲染进程没了：' + (d && d.reason)));
+  app.on('child-process-gone', (e, d) => console.log('[life] 子进程没了：' + (d && d.type) + ' ' + (d && d.reason)));
+  app.on('will-quit', () => console.log('[life] will-quit'));
+  app.on('window-all-closed', () => console.log('[life] 所有窗口都关了，tray=' + (tray ? '有' : '没有')));
+
+  app.whenReady().then(() => {
+    loadLinkCache();
+    loadOutbox();
+    loadSettings();
+    createWindow();
+    createTray();
+    startCursorLoop();
+    startSysLoop();
+    startFullscreenWatch();
+    startWatchLoop();
+
+    bridge = createBridge({ onState: handleLinkState, onWatch: handleWatchResult });
+    bridge.start().then((port) => {
+      console.log('[bridge] listening on 127.0.0.1:' + (port || '(failed)'));
+      flushOutbox();
+      flushWatchPending();          // 上次没分析完的（管家当时没开 / 程序被关），这次补上
+    });
+    bridge.setStatusProvider(() => ({
+      cpu: lastSys ? lastSys.cpu : 0,
+      mem: lastSys ? lastSys.mem : 0,
+      coreMax: lastSys ? lastSys.coreMax : 0,
+      cores: lastSys ? lastSys.cores : 0,
+      ts: lastSys ? lastSys.ts : 0,
+      hist: sysHistory.slice(-120),
+      watching: !!(watcher && watcher.status()),
+      watch: watcher ? watcher.status() : null,
+      link: { online: bridge.isOnline(), todos: link.state ? link.state.todos : 0 }
+    }));
+
+    // 全局快捷键：跟随时按钮会跟着窗口跑，必须有个系统级开关兜底
+    const shortcuts = [
+      ['CommandOrControl+Alt+F', '跟随开关', () => {
+        state.follow = !state.follow;
+        if (win) win.webContents.send('pet:follow', state.follow);
+        if (tray) tray.setContextMenu(buildTrayMenu());
+      }],
+      ['CommandOrControl+Alt+Space', '随手记一条', () => openQuickNote()],
+      ['CommandOrControl+Alt+V', '收下剪贴板', () => clipboardHarvest()],
+      ['CommandOrControl+Alt+H', '隐身/现身', () => toggleManualHide()],
+      ['CommandOrControl+Alt+B', '陪看开关', () => toggleWatch()],
+      ['CommandOrControl+Alt+L', '打开最新陪看报告', () => openLatestReport()],
+      ['CommandOrControl+Alt+R', '重启小机器人', () => restartApp()]
+    ];
+    for (const [accel, name, fn] of shortcuts) {
+      let ok = false;
+      try { ok = globalShortcut.register(accel, fn); } catch (e) { ok = false; }
+      console.log('[shortcut] ' + accel + ' (' + name + ') ' + (ok ? 'registered' : 'register failed (可能被占用)'));
+    }
+
+    // 心跳过期检测：网页关掉后 45s 内没收到状态就判定离线
+    linkTimer = setInterval(() => {
+      if (bridge) bridge.checkTimeout();
+    }, 5000);
+
+    // 兜底：网络抖动时也要把攒着的记录送出去
+    setInterval(() => { if (bridge && bridge.isOnline()) flushOutbox(); }, 8000);
+  });
+
+  app.on('window-all-closed', () => {
+    // 托盘常驻：关掉窗口也先不退出，交给托盘菜单
+    if (!tray) app.quit();
+  });
+
+  app.on('before-quit', () => {
+    quitting = true;
+    if (cursorTimer) clearInterval(cursorTimer);
+    if (linkTimer) clearInterval(linkTimer);
+    if (sysTimer) clearInterval(sysTimer);
+    if (fsTimer) clearInterval(fsTimer);
+    if (watchTimer) clearInterval(watchTimer);
+    if (watcher) { try { watcher.stop('quit'); } catch (e) { /* 忽略 */ } }
+    if (bridge) bridge.stop();
+    try { globalShortcut.unregisterAll(); } catch (e) { /* ignore */ }
+  });
+}
+
+/**
+ * 抢单实例锁。一键重启时老进程可能还没退干净、锁还握在它手里 ——
+ * 这时候直接 quit 的话，新进程会当场死掉，桌宠就从桌面上消失了。
+ * 所以带 --relaunch 标记时隔 350ms 再抢，最多 8 次（约 3 秒）；
+ * 平时重复双击没有这个标记，抢不到就立刻退出，不会反复抢焦点。
+ */
+const IS_RELAUNCH = process.argv.indexOf('--relaunch') >= 0;
+function acquireLock(attempt) {
+  if (app.requestSingleInstanceLock()) return boot();
+  if (!IS_RELAUNCH || attempt >= 8) { app.quit(); return; }
+  setTimeout(() => acquireLock(attempt + 1), 350);
+}
+acquireLock(0);

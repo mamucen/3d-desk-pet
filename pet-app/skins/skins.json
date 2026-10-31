@@ -1,0 +1,52 @@
+[
+  {
+    "id": "pixel",
+    "name": "像素喵",
+    "rarity": "R",
+    "file": "workbuddy-像素喵-1793464544417.png",
+    "theme": "#57d97a",
+    "w": 352,
+    "h": 451,
+    "out": "pixel.png"
+  },
+  {
+    "id": "stellar",
+    "name": "星际喵",
+    "rarity": "SR",
+    "file": "workbuddy-星际喵-1793464535734.png",
+    "theme": "#4da3ff",
+    "w": 411,
+    "h": 527,
+    "out": "stellar.png"
+  },
+  {
+    "id": "rich",
+    "name": "暴富喵",
+    "rarity": "UR",
+    "file": "workbuddy-暴富喵-1793464529114.png",
+    "theme": "#e8b64c",
+    "w": 447,
+    "h": 573,
+    "out": "rich.png"
+  },
+  {
+    "id": "camera",
+    "name": "镜头喵",
+    "rarity": "R",
+    "file": "workbuddy-镜头喵-1793464520480.png",
+    "theme": "#f5c542",
+    "w": 421,
+    "h": 539,
+    "out": "camera.png"
+  },
+  {
+    "id": "pubg",
+    "name": "和平精英喵",
+    "rarity": "R",
+    "file": "workbuddy-和平精英喵-1793464509600.png",
+    "theme": "#37c8f0",
+    "w": 506,
+    "h": 600,
+    "out": "pubg.png"
+  }
+]

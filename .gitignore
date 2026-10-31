@@ -1,0 +1,17 @@
+# 依赖与构建产物
+node_modules/
+pet-app/node_modules/
+
+# 本地运行数据（在系统 userData 里，这里只是兜底）
+pet-app/pet-settings.json
+*.log
+
+# 开发/工作区产物
+.tmp/
+.shots/
+.workbuddy/
+*.genie
+vendor/
+
+# 本地皮肤源图（生成的成品在 pet-app/skins/，源图不入库）
+tools/*.png

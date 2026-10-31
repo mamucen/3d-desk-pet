@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>桌面小机器人 · 悬浮宠物</title>
+<style>
+  :root {
+    --ink: #2b2f33;
+    --outline: #4a4f54;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* ---------- 悬浮宠物本体 ---------- */
+  #pet {
+    position: fixed;
+    right: 48px;
+    bottom: 56px;
+    width: 156px;
+    height: 176px;
+    cursor: grab;
+    touch-action: none;
+    z-index: 9999;
+  }
+  #pet.dragging { cursor: grabbing; }
+  #pet.following { cursor: crosshair; }
+
+  #pet svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    filter: drop-shadow(0 10px 10px rgba(20, 24, 28, .28));
+  }
+
+  .robot-root { animation: bob 2.6s ease-in-out infinite; transform-origin: 24px 50px; }
+  @keyframes bob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2.6px); }
+  }
+
+  .ground-shadow {
+    animation: shadowPulse 2.6s ease-in-out infinite;
+    transform-origin: 24px 50px;
+  }
+  @keyframes shadowPulse {
+    0%, 100% { opacity: .30; transform: scaleX(1); }
+    50% { opacity: .20; transform: scaleX(.92); }
+  }
+
+  /* 打字的小手臂 */
+  #armL { animation: typeL 0.9s steps(2) infinite; transform-origin: 14px 34px; }
+  #armR { animation: typeR 0.9s steps(2) infinite; transform-origin: 34px 34px; }
+  @keyframes typeL { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-7deg); } }
+  @keyframes typeR { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(7deg); } }
+
+  /* 屏幕光标闪烁 */
+  #typeCursor { animation: cursorBlink 1.1s steps(1) infinite; }
+  @keyframes cursorBlink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
+
+  /* 眨眼（作用于内层组，避免覆盖 JS 的位移） */
+  #eyesBlink { transform-box: fill-box; transform-origin: center; transition: transform .09s ease; }
+  .blink #eyesBlink { transform: scaleY(.12); }
+  .happy #eyesBlink { opacity: 0; }
+  #eyesHappy { opacity: 0; transition: opacity .12s ease; }
+  .happy #eyesHappy { opacity: 1; }
+
+  /* ---------- 动作 ---------- */
+  .act-jump .robot-root { animation: jump .62s cubic-bezier(.3, 1.6, .5, 1); }
+  @keyframes jump {
+    0%   { transform: translateY(0) scaleY(1); }
+    18%  { transform: translateY(2px) scaleY(.86); }
+    45%  { transform: translateY(-30px) scaleY(1.08); }
+    75%  { transform: translateY(0) scaleY(.94); }
+    100% { transform: translateY(0) scaleY(1); }
+  }
+  .act-spin .robot-root { animation: spin .7s cubic-bezier(.4, .1, .3, 1); }
+  @keyframes spin {
+    0% { transform: rotate(0); }
+    60% { transform: rotate(360deg) translateY(-8px); }
+    100% { transform: rotate(360deg); }
+  }
+  .act-nod .robot-root { animation: nod .55s ease; }
+  @keyframes nod {
+    0%, 100% { transform: rotate(0); }
+    30% { transform: rotate(-7deg); }
+    65% { transform: rotate(6deg); }
+  }
+
+  /* 跟随模式的小碎步 */
+  .following.walking .robot-root { animation: waddle .34s ease-in-out infinite; }
+  @keyframes waddle {
+    0%, 100% { transform: rotate(-3.5deg) translateY(0); }
+    50% { transform: rotate(3.5deg) translateY(-1.6px); }
+  }
+
+  /* ---------- 气泡 ---------- */
+  #bubble {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% - 14px);
+    transform: translateX(-50%) translateY(6px) scale(.7);
+    background: #ffffff;
+    border: 2px solid var(--ink);
+    border-radius: 10px;
+    padding: 6px 11px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .16s ease, transform .18s cubic-bezier(.3, 1.5, .5, 1);
+    box-shadow: 0 4px 10px rgba(20, 24, 28, .18);
+  }
+  #bubble::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: -7px;
+    width: 10px; height: 10px;
+    background: #fff;
+    border-right: 2px solid var(--ink);
+    border-bottom: 2px solid var(--ink);
+    transform: translateX(-50%) rotate(45deg);
+  }
+  #bubble.show { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+
+  /* ---------- 粒子 ---------- */
+  .particle {
+    position: absolute;
+    font-size: 14px;
+    pointer-events: none;
+    animation: floatUp .95s ease-out forwards;
+  }
+  @keyframes floatUp {
+    0%   { opacity: 0; transform: translate(0, 0) scale(.5) rotate(0); }
+    20%  { opacity: 1; }
+    100% { opacity: 0; transform: translate(var(--dx), -56px) scale(1.15) rotate(var(--rot)); }
+  }
+
+  /* ---------- 模式徽标 & 提示 ---------- */
+  #modeBadge {
+    position: absolute;
+    top: -12px;
+    left: 50%;
+    transform: translateX(-50%) scale(0);
+    background: var(--ink);
+    color: #fff;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    padding: 3px 9px;
+    border-radius: 99px;
+    transition: transform .2s cubic-bezier(.3, 1.5, .5, 1);
+    pointer-events: none;
+  }
+  #pet.following #modeBadge { transform: translateX(-50%) scale(1); }
+
+  #hint {
+    position: fixed;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    font-size: 12px;
+    color: rgba(60, 66, 72, .75);
+    background: rgba(255, 255, 255, .82);
+    border: 1px solid rgba(60, 66, 72, .18);
+    border-radius: 99px;
+    padding: 5px 14px;
+    backdrop-filter: blur(4px);
+    transition: opacity .6s ease;
+    pointer-events: none;
+  }
+  #hint.fade { opacity: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .robot-root, #armL, #armR, .ground-shadow { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div id="pet" title="小机器人">
+  <span id="modeBadge">跟随模式</span>
+  <span id="bubble"></span>
+
+  <svg viewBox="0 0 48 54" shape-rendering="crispEdges" aria-label="像素小机器人">
+    <!-- 地面阴影 -->
+    <ellipse class="ground-shadow" cx="24" cy="50.5" rx="14" ry="2.6" fill="#1c2126"/>
+
+    <g class="robot-root">
+      <!-- 腿（坐着，向前伸） -->
+      <g stroke="#3d4247" stroke-width="1">
+        <rect x="15" y="42" width="8" height="7" rx="1.5" fill="#8f958f"/>
+        <rect x="25" y="42" width="8" height="7" rx="1.5" fill="#9ba19b"/>
+      </g>
+
+      <!-- 身体 -->
+      <g>
+        <rect x="13" y="29" width="22" height="15" rx="2.5" fill="#c6cbc6" stroke="#3d4247" stroke-width="1.1"/>
+        <rect x="13" y="37.5" width="22" height="6.5" rx="2" fill="#aeb3ae"/>
+        <rect x="13" y="29" width="22" height="4" rx="2" fill="#d7dcd7"/>
+        <!-- 胸口小指示灯 -->
+        <rect x="22" y="34" width="4" height="3" rx="0.8" fill="#79c98f" stroke="#2c5e3d" stroke-width="0.7">
+          <animate attributeName="opacity" values="1;.35;1" dur="1.8s" repeatCount="indefinite"/>
+        </rect>
+      </g>
+
+      <!-- 手臂（在笔记本上打字） -->
+      <g id="armL">
+        <rect x="9" y="32" width="7" height="4.5" rx="2.2" fill="#b9beb9" stroke="#3d4247" stroke-width="1"/>
+      </g>
+      <g id="armR">
+        <rect x="32" y="32" width="7" height="4.5" rx="2.2" fill="#b9beb9" stroke="#3d4247" stroke-width="1"/>
+      </g>
+
+      <!-- 腿上的小笔记本 -->
+      <g transform="rotate(-6 25 41)">
+        <rect x="17" y="39.5" width="17" height="5" rx="1" fill="#233028" stroke="#101512" stroke-width="0.9"/>
+        <rect x="18.4" y="40.6" width="2" height="1.2" fill="#7ba184"/>
+        <rect x="21.2" y="40.6" width="2" height="1.2" fill="#7ba184"/>
+        <rect x="24" y="40.6" width="2" height="1.2" fill="#7ba184"/>
+        <rect x="26.8" y="40.6" width="2" height="1.2" fill="#7ba184"/>
+        <rect x="18.4" y="42.4" width="13.4" height="0.9" fill="#40584a"/>
+        <rect x="19" y="33.6" width="13" height="6.4" rx="1" fill="#17201a" stroke="#0c110d" stroke-width="0.9"/>
+        <rect x="20.2" y="34.7" width="10.6" height="4.2" rx="0.6" fill="#2f4a36"/>
+        <rect x="21.4" y="35.6" width="4.5" height="0.9" fill="#8fce9d" opacity=".85"/>
+        <rect id="typeCursor" x="26.6" y="35.6" width="1.6" height="1.4" fill="#c9f2d0"/>
+      </g>
+
+      <!-- 头（外层由 JS 驱动位移+旋转，内层是造型） -->
+      <g id="headMove">
+        <g>
+          <!-- 头主体 -->
+          <rect x="7" y="3" width="34" height="26" rx="3.5" fill="#f1f1ee" stroke="#3d4247" stroke-width="1.2"/>
+          <!-- 底部与右侧的体感阴影 -->
+          <path d="M9 23 h30 a2.5 2.5 0 0 1 -2.5 4.5 h-25 a2.5 2.5 0 0 1 -2.5 -4.5 Z" fill="#dcdcd7"/>
+          <rect x="36.5" y="5" width="3.5" height="22" rx="1.5" fill="#e2e2dd"/>
+          <!-- 顶部高光 -->
+          <rect x="11" y="5.5" width="8" height="2.4" rx="1.2" fill="#ffffff" opacity=".9"/>
+          <!-- 屏幕外框 -->
+          <rect x="11.5" y="8.5" width="25" height="16.5" rx="2.2" fill="#23282c" stroke="#14181b" stroke-width="1"/>
+          <!-- 黑屏 -->
+          <rect x="12.6" y="9.6" width="22.8" height="14.3" rx="1.6" fill="#0d1013"/>
+
+          <!-- 眼睛：外层 JS 位移 → 内层眨眼 -->
+          <g id="eyesMove">
+            <g id="eyesBlink">
+              <g id="eyesNormal" fill="#ffffff">
+                <path d="M20 12.6 l2.9 3.4 -2.9 3.4 -2.9 -3.4 Z"/>
+                <path d="M28 12.6 l2.9 3.4 -2.9 3.4 -2.9 -3.4 Z"/>
+              </g>
+              <g id="eyesHappy" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round">
+                <path d="M17.4 16.4 q2.6 -3.4 5.2 0"/>
+                <path d="M25.4 16.4 q2.6 -3.4 5.2 0"/>
+              </g>
+            </g>
+          </g>
+
+          <!-- 屏幕反光 -->
+          <rect x="14" y="10.6" width="3.2" height="1.4" rx="0.7" fill="#ffffff" opacity=".14"/>
+        </g>
+      </g>
+    </g>
+  </svg>
+</div>
+
+<div id="hint">拖动移动 · 点它互动 · 双击切换「跟随鼠标」模式</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var pet = document.getElementById('pet');
+  var bubble = document.getElementById('bubble');
+  var hint = document.getElementById('hint');
+  var headMove = document.getElementById('headMove');
+  var eyesMove = document.getElementById('eyesMove');
+
+  /* ---------------- 状态 ---------------- */
+  var cur = { x: 0, y: 0 };          // 头/眼当前偏移（平滑后）
+  var target = { x: 0, y: 0 };       // 目标偏移
+  var mouse = { x: innerWidth / 2, y: innerHeight / 2, inside: false };
+
+  var pos = {                        // 宠物在页面上的位置
+    x: innerWidth - 48 - 156,
+    y: innerHeight - 56 - 176
+  };
+
+  var dragging = false;
+  var dragMoved = 0;
+  var downAt = 0;
+  var followMode = false;
+  var hoveringHead = false;
+
+  pet.style.left = pos.x + 'px';
+  pet.style.top = pos.y + 'px';
+  pet.style.right = 'auto';
+  pet.style.bottom = 'auto';
+
+  function robotCenter() {
+    return { x: pos.x + 78, y: pos.y + 62 }; // 头部中心附近
+  }
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  /* ---------------- 眼神跟随 ---------------- */
+  addEventListener('pointermove', function (e) {
+    mouse.x = e.clientX;
+    mouse.y = e.clientY;
+    mouse.inside = true;
+
+    if (dragging) {
+      var nx = clamp(e.clientX - dragOff.x, 4, innerWidth - 156);
+      var ny = clamp(e.clientY - dragOff.y, 4, innerHeight - 176);
+      dragMoved += Math.abs(nx - pos.x) + Math.abs(ny - pos.y);
+      pos.x = nx; pos.y = ny;
+      pet.style.left = pos.x + 'px';
+      pet.style.top = pos.y + 'px';
+      return;
+    }
+
+    var c = robotCenter();
+    var dx = e.clientX - c.x;
+    var dy = e.clientY - c.y;
+    var dist = Math.hypot(dx, dy) || 1;
+    var reach = clamp(dist / 260, 0, 1);
+    target.x = clamp((dx / dist) * reach, -1, 1);
+    target.y = clamp((dy / dist) * reach, -1, 1);
+
+    // 摸头：鼠标落在头顶范围
+    var onHead = dx > -60 && dx < 60 && dy > -40 && dy < 16;
+    if (onHead !== hoveringHead) {
+      hoveringHead = onHead;
+      pet.classList.toggle('happy', onHead);
+      if (onHead) say(pick(['好舒服～', '摸摸头。', '嗡——功率提升！']));
+    }
+  }, { passive: true });
+
+  addEventListener('pointerout', function (e) {
+    if (!e.relatedTarget) { mouse.inside = false; target.x = 0; target.y = 0; }
+  });
+
+  addEventListener('blur', function () { target.x = 0; target.y = 0; });
+
+  /* ---------------- 渲染循环 ---------------- */
+  function frame() {
+    cur.x += (target.x - cur.x) * 0.12;
+    cur.y += (target.y - cur.y) * 0.12;
+
+    headMove.setAttribute('transform',
+      'translate(' + (cur.x * 1.7).toFixed(2) + ' ' + (cur.y * 1.3).toFixed(2) + ')' +
+      ' rotate(' + (cur.x * 5).toFixed(2) + ' 24 16)');
+    eyesMove.setAttribute('transform',
+      'translate(' + (cur.x * 2.3).toFixed(2) + ' ' + (cur.y * 1.9).toFixed(2) + ')');
+
+    if (followMode && !dragging) stepFollow();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  /* ---------------- 跟随模式 ---------------- */
+  function stepFollow() {
+    var tx = clamp(mouse.x - 78, 6, innerWidth - 162);
+    var ty = clamp(mouse.y - 96, 6, innerHeight - 182);
+    var dx = tx - pos.x;
+    var dy = ty - pos.y;
+    var dist = Math.hypot(dx, dy);
+
+    if (dist > 46) {
+      var speed = clamp(dist * 0.028, 0.6, 3.4);
+      pos.x += (dx / dist) * speed;
+      pos.y += (dy / dist) * speed;
+      pet.style.left = pos.x + 'px';
+      pet.style.top = pos.y + 'px';
+      pet.classList.add('walking');
+    } else {
+      pet.classList.remove('walking');
+    }
+    // 跟随时顺便看向鼠标
+    var c = robotCenter();
+    var vx = mouse.x - c.x, vy = mouse.y - c.y;
+    var vd = Math.hypot(vx, vy) || 1;
+    target.x = clamp(vx / vd, -1, 1);
+    target.y = clamp(vy / vd, -1, 1);
+  }
+
+  /* ---------------- 拖拽 / 点击 / 双击 ---------------- */
+  var dragOff = { x: 0, y: 0 };
+
+  pet.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    dragging = true;
+    dragMoved = 0;
+    downAt = Date.now();
+    dragOff.x = e.clientX - pos.x;
+    dragOff.y = e.clientY - pos.y;
+    pet.classList.add('dragging');
+    pet.setPointerCapture(e.pointerId);
+  });
+
+  pet.addEventListener('pointerup', function (e) {
+    if (!dragging) return;
+    dragging = false;
+    pet.classList.remove('dragging');
+    var quick = Date.now() - downAt < 420;
+    if (dragMoved < 8 && quick) react(e);
+  });
+
+  pet.addEventListener('dblclick', function () {
+    followMode = !followMode;
+    pet.classList.toggle('following', followMode);
+    if (followMode) {
+      say('跟随模式，出发！');
+      pet.classList.add('walking');
+      setTimeout(function () { pet.classList.remove('walking'); }, 600);
+    } else {
+      say('原地待命～');
+      pet.classList.remove('walking');
+    }
+  });
+
+  /* ---------------- 互动反应 ---------------- */
+  var IDLE_WORDS = [
+    '在呢！', '敲完了这行代码。', '你的待办我还记着呢。',
+    '今天也要加油呀。', '嗡——待机中。', '要不要摸摸头？',
+    '双击我可以跟着你走。', '(๑•̀ㅂ•́)و'
+  ];
+  var POKES = [
+    '别戳我啦！', '嘿嘿，痒。', '收到！已记在小本本上。',
+    '萤幕差点被你戳穿！', '再戳就要跳舞了。', '哔——'
+  ];
+  var PARTICLES = ['✦', '♥', '♪', '✧', '★', '⚙'];
+
+  function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+  var bubbleTimer = null;
+  function say(text) {
+    bubble.textContent = text;
+    bubble.classList.add('show');
+    clearTimeout(bubbleTimer);
+    bubbleTimer = setTimeout(function () { bubble.classList.remove('show'); }, 1700);
+  }
+
+  function spawnParticles(n) {
+    for (var i = 0; i < n; i++) {
+      var p = document.createElement('span');
+      p.className = 'particle';
+      p.textContent = pick(PARTICLES);
+      p.style.left = (44 + Math.random() * 68) + 'px';
+      p.style.top = (18 + Math.random() * 26) + 'px';
+      p.style.setProperty('--dx', (Math.random() * 60 - 30).toFixed(0) + 'px');
+      p.style.setProperty('--rot', (Math.random() * 80 - 40).toFixed(0) + 'deg');
+      pet.appendChild(p);
+      (function (el) { setTimeout(function () { el.remove(); }, 1000); })(p);
+    }
+  }
+
+  function react(e) {
+    var acts = ['act-jump', 'act-spin', 'act-nod'];
+    var act = pick(acts);
+
+    // 头顶被点 = 开心跳跃；身体被点 = 随机反应
+    var rect = pet.getBoundingClientRect();
+    var onHead = e && (e.clientY - rect.top) < rect.height * 0.45;
+
+    pet.classList.remove('act-jump', 'act-spin', 'act-nod');
+    void pet.offsetWidth; // 重置动画
+    pet.classList.add(act);
+    setTimeout(function () { pet.classList.remove(act); }, 750);
+
+    if (onHead) {
+      pet.classList.add('happy');
+      setTimeout(function () {
+        if (!hoveringHead) pet.classList.remove('happy');
+      }, 1200);
+      say(pick(['开心！', '耶！', '(≧▽≦)']));
+      spawnParticles(6);
+    } else {
+      say(pick(POKES));
+      if (Math.random() < 0.55) spawnParticles(3);
+    }
+  }
+
+  /* ---------------- 眨眼 & 闲聊 ---------------- */
+  function scheduleBlink() {
+    setTimeout(function () {
+      pet.classList.add('blink');
+      setTimeout(function () {
+        pet.classList.remove('blink');
+        if (Math.random() < 0.25) { // 偶尔连眨两下
+          setTimeout(function () {
+            pet.classList.add('blink');
+            setTimeout(function () { pet.classList.remove('blink'); }, 130);
+          }, 150);
+        }
+      }, 130);
+      scheduleBlink();
+    }, 2400 + Math.random() * 3200);
+  }
+  scheduleBlink();
+
+  function scheduleChatter() {
+    setTimeout(function () {
+      if (!dragging && !document.hidden) say(pick(IDLE_WORDS));
+      scheduleChatter();
+    }, 16000 + Math.random() * 20000);
+  }
+  scheduleChatter();
+
+  // 防止拖拽时选中文本 / 图片拖拽
+  pet.addEventListener('dragstart', function (e) { e.preventDefault(); });
+
+  // 提示条自动淡出
+  setTimeout(function () { hint.classList.add('fade'); }, 9000);
+  hint.addEventListener('pointerenter', function () { hint.classList.remove('fade'); });
+})();
+</script>
+</body>
+</html>
