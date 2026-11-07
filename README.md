@@ -1,7 +1,7 @@
 # 3D Desk Pet · 3D 桌面小机器人 🤖
 
 一只常驻桌面右下角的 3D 小机器人，配一套「个人信息管家」网页应用。
-它会帮你记事、报 CPU/内存，看 B 站视频时自动记笔记、出分析报告，还有 6 款可换的盲盒皮肤。
+它会帮你记事、报 CPU/内存，看 B 站视频时自动记笔记、出分析报告，还有 10 款可换的盲盒皮肤。
 
 > 纯本地运行：笔记数据存在你自己的云数据库，B 站接口全部匿名调用，不需要任何账号/密钥。
 
@@ -9,8 +9,8 @@
 
 | 下载 | 大小 | 说明 |
 |------|------|------|
-| [**3D桌宠 便携版 v1.0.2**](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.2/3D-desk-pet-portable-v1.0.2.zip) | 110 MB | 免安装，解压后双击 `3D桌宠.exe` 即可运行（Windows x64） |
-| [源码包 v1.0.2](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.2/3d-desk-pet-source-v1.0.2.zip) | 1.2 MB | 完整源码，适合自己改 |
+| [**3D桌宠 便携版 v1.0.3**](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.3/3D-desk-pet-portable-v1.0.3.zip) | 110 MB | 免安装，解压后双击 `3D桌宠.exe` 即可运行（Windows x64） |
+| [源码包 v1.0.3](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.3/3d-desk-pet-source-v1.0.3.zip) | 1.2 MB | 完整源码，适合自己改 |
 | [源码（最新）](https://github.com/mamucen/3d-desk-pet/archive/refs/heads/main.zip) | — | GitHub 自动打包的当前 main 分支 |
 
 在线体验网页版：**https://mamucen.github.io/3d-desk-pet/**
@@ -23,8 +23,8 @@
 **桌面机器人（Electron）**
 - 3D 小人常驻桌面：置顶、点击穿透、拖拽、跟随鼠标、全屏自动隐身、开机自启
 - 实时负载小机箱：CPU / 内存 / 核心占用滚动显示，另有浏览器大屏面板
-- 6 款皮肤：经典机器人 + 像素喵 / 星际喵 / 暴富喵 / 镜头喵 / 和平精英喵，
-  换肤后主题色小机箱跟着换，名字 + 稀有度徽章（R / SR / UR）
+- 10 款皮肤：经典机器人 + 像素喵 / 星际喵 / 暴富喵 / 镜头喵 / 和平精英喵 / 武士喵 / 火锅喵 / 深海喵 / 夜光喵，
+  换肤后主题色小机箱跟着换，名字 + 稀有度徽章（R / SR / UR / SSR）
 - 快捷输入条（随手记）、剪贴板快收、语音播报、原生右键菜单 + 托盘菜单
 - 电脑变卡/变红时：右键「一键清空缓存」清掉过期录像与 7 天前临时文件（不动笔记/报告/个人文件），
   「看看谁在吃 CPU / 内存」直接列出最忙的几个进程并一键打开任务管理器

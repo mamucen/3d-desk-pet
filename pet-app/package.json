@@ -1,6 +1,6 @@
 {
   "name": "desk-pet",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "private": true,
   "description": "3D 桌面小机器人 · 常驻后台的悬浮宠物",
   "main": "main.js",

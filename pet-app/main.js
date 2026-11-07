@@ -101,7 +101,11 @@ const SKINS = [
   { id: 'stellar', name: '星际喵' },
   { id: 'rich',    name: '暴富喵' },
   { id: 'camera',  name: '镜头喵' },
-  { id: 'pubg',    name: '和平精英喵' }
+  { id: 'pubg',    name: '和平精英喵' },
+  { id: 'samurai', name: '武士喵' },
+  { id: 'hotpot',  name: '火锅喵' },
+  { id: 'deepsea', name: '深海喵' },
+  { id: 'ghost',   name: '夜光喵' }
 ];
 function applySkinChoice(id) {
   if (!SKINS.some((s) => s.id === id)) id = 'robot';

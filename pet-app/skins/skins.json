@@ -48,5 +48,49 @@
     "w": 506,
     "h": 600,
     "out": "pubg.png"
+  },
+  {
+    "id": "samurai",
+    "name": "武士喵",
+    "rarity": "SSR",
+    "file": "AI生成-武士喵（以stellar.png为画风参考）",
+    "theme": "#6d7ff2",
+    "w": 512,
+    "h": 768,
+    "out": "samurai.jpg",
+    "imgExt": ".jpg"
+  },
+  {
+    "id": "hotpot",
+    "name": "火锅喵",
+    "rarity": "UR",
+    "file": "AI生成-火锅喵（以stellar.png为画风参考）",
+    "theme": "#e6502e",
+    "w": 512,
+    "h": 768,
+    "out": "hotpot.jpg",
+    "imgExt": ".jpg"
+  },
+  {
+    "id": "deepsea",
+    "name": "深海喵",
+    "rarity": "SR",
+    "file": "AI生成-深海喵（以stellar.png为画风参考）",
+    "theme": "#2fd6b8",
+    "w": 512,
+    "h": 768,
+    "out": "deepsea.jpg",
+    "imgExt": ".jpg"
+  },
+  {
+    "id": "ghost",
+    "name": "夜光喵",
+    "rarity": "SSR",
+    "file": "AI生成-夜光喵（以stellar.png为画风参考）",
+    "theme": "#b06cff",
+    "w": 512,
+    "h": 768,
+    "out": "ghost.jpg",
+    "imgExt": ".jpg"
   }
 ]

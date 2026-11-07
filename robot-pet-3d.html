@@ -1616,7 +1616,11 @@
     stellar: { id: 'stellar',  name: '星际喵',     rarity: 'SR', theme: '#4da3ff' },
     rich:    { id: 'rich',     name: '暴富喵',     rarity: 'UR', theme: '#e8b64c' },
     camera:  { id: 'camera',   name: '镜头喵',     rarity: 'R',  theme: '#f5c542' },
-    pubg:    { id: 'pubg',     name: '和平精英喵', rarity: 'R',  theme: '#37c8f0' }
+    pubg:    { id: 'pubg',     name: '和平精英喵', rarity: 'R',  theme: '#37c8f0' },
+    samurai: { id: 'samurai',  name: '武士喵',     rarity: 'SSR', theme: '#6d7ff2', imgExt: '.jpg' },
+    hotpot:  { id: 'hotpot',   name: '火锅喵',     rarity: 'UR',  theme: '#e6502e', imgExt: '.jpg' },
+    deepsea: { id: 'deepsea',  name: '深海喵',     rarity: 'SR',  theme: '#2fd6b8', imgExt: '.jpg' },
+    ghost:   { id: 'ghost',    name: '夜光喵',     rarity: 'SSR', theme: '#b06cff', imgExt: '.jpg' }
   };
   var skinId = 'robot';
   var skinImg = document.getElementById('skinImg');
@@ -1640,7 +1644,7 @@
     var on = s.id !== 'robot';
     pet.classList.toggle('skin-card', on);
     if (on) {
-      var src = 'pet-app/skins/' + s.id + '.png';
+      var src = 'pet-app/skins/' + s.id + (s.imgExt || '.png');
       if (skinImg.getAttribute('src') !== src) skinImg.src = src;
       skinName.textContent = s.name;
       skinRarity.textContent = s.rarity ? s.rarity + ' 级稀有度' : '';
