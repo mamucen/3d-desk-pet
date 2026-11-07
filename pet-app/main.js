@@ -13,6 +13,7 @@ const { createOutbox } = require('./outbox');
 const { createWatcher, cleanTitle, listPendingSessions, markSessionSent, dropSession, adoptLegacySessions, noteSessionAttempt, MAX_TRIES } = require('./watch');
 const { buildReport } = require('./report');
 const bili = require('./bili');
+const { APPS: INTERACT_APPS, SYSTEM_EVENTS, NEVER: INTERACT_NEVER } = require('./interact-apps');
 
 const WIN_W = 164;
 const WIN_H = 252;
@@ -92,7 +93,11 @@ const state = { follow: false, top: true };
 let link = { online: false, state: null, appUrl: DEFAULT_APP_URL };
 let stateFile = '';
 let settingsFile = '';
-const settings = { autoStart: false, autoHide: true, watchMode: true, skin: 'robot', wander: false, study: true, ybcUnlocked: false };
+const settings = {
+  autoStart: false, autoHide: true, watchMode: true, skin: 'robot', wander: false, study: true, ybcUnlocked: false,
+  // 互动应用：allow 里为 true 的应用才搭理；custom 是用户自己加的关键词
+  interact: { on: true, allow: { doubao: true }, custom: [], greetBack: true, bt: false }
+};
 
 /* ---------- 皮肤 ---------- */
 const SKINS = [
@@ -180,6 +185,14 @@ function loadSettings() {
         if (typeof raw.wander === 'boolean') settings.wander = raw.wander;
         if (typeof raw.study === 'boolean') settings.study = raw.study;
         if (typeof raw.ybcUnlocked === 'boolean') settings.ybcUnlocked = raw.ybcUnlocked;
+        if (raw.interact && typeof raw.interact === 'object') {
+          const it = raw.interact;
+          if (typeof it.on === 'boolean') settings.interact.on = it.on;
+          if (it.allow && typeof it.allow === 'object') settings.interact.allow = it.allow;
+          if (Array.isArray(it.custom)) settings.interact.custom = it.custom.filter((c) => c && c.name);
+          if (typeof it.greetBack === 'boolean') settings.interact.greetBack = it.greetBack;
+          if (typeof it.bt === 'boolean') settings.interact.bt = it.bt;
+        }
       }
     }
   } catch (err) { /* 用默认值 */ }
@@ -811,6 +824,264 @@ function startStudyLoop() {
       if (dbg) console.log('[study] 异常: ' + (err && err.message));
     }
   }, 15000);
+}
+
+/* ---------- 互动应用：可勾选的应用白名单 ----------
+   用户自己勾选「哪些应用出现时搭理我」，比如豆包悬浮窗、微信、网易云。
+   判断方式只有一种：desktopCapturer 读窗口标题（纯读取，不截图内容、不模拟按键）。
+   系统事件（蓝牙开关）靠只读的 Get-PnpDevice 状态探针，不改变任何系统设置。 */
+const INTERACT_COOLDOWN = 8 * 60 * 1000;   // 同一个应用 8 分钟内只打一次招呼
+let interactTimer = null;
+let interactBtTimer = null;
+let interactWin = null;
+let interactPrev = new Set();
+const interactLastAt = {};
+let interactSnapshot = { ids: [], titles: [], at: 0 };
+let btState = null;
+
+function interactCfg() {
+  if (!settings.interact || typeof settings.interact !== 'object') {
+    settings.interact = { on: true, allow: {}, custom: [], greetBack: true, bt: false };
+  }
+  const s = settings.interact;
+  if (!s.allow || typeof s.allow !== 'object') s.allow = {};
+  if (!Array.isArray(s.custom)) s.custom = [];
+  return s;
+}
+
+async function interactTitles() {
+  const sources = await desktopCapturer.getSources({
+    types: ['window'],
+    thumbnailSize: { width: 0, height: 0 },
+    fetchWindowIcons: false
+  });
+  const out = [];
+  for (const s of sources) {
+    const n = String(s.name || '').trim();
+    if (!n) continue;
+    if (n.indexOf('小机器人') >= 0 || n.indexOf('互动应用') >= 0) continue;   // 跳过自己
+    if (INTERACT_NEVER.some((k) => n.indexOf(k) >= 0)) continue;              // 安全禁区永不搭理
+    out.push(n);
+  }
+  return out;
+}
+
+async function interactScan() {
+  const cfg = interactCfg();
+  const titles = await interactTitles();
+  const matched = new Set();     // 允许互动且当前存在
+  const running = new Set();     // 只是当前存在（用于面板展示）
+  const hit = {};
+  for (const app of INTERACT_APPS) {
+    let onScreen = false;
+    for (const t of titles) {
+      if ((app.keys || []).some((k) => t.indexOf(k) >= 0)) { onScreen = true; hit[app.id] = t; break; }
+    }
+    if (!onScreen) continue;
+    running.add(app.id);
+    if (cfg.allow[app.id] === true) matched.add(app.id);
+  }
+  for (const cu of cfg.custom) {
+    const keys = ((cu.keys && cu.keys.length) ? cu.keys : [cu.name]).filter(Boolean);
+    for (const t of titles) {
+      if (keys.some((k) => t.indexOf(k) >= 0)) {
+        running.add('c:' + cu.id);
+        if (cu.on !== false) { matched.add('c:' + cu.id); hit['c:' + cu.id] = t; }
+        break;
+      }
+    }
+  }
+  return { titles, matched, running, hit };
+}
+
+function interactSay(lines) {
+  if (!lines || !lines.length) return;
+  if (!win || win.isDestroyed()) return;
+  petSay(lines[Math.floor(Math.random() * lines.length)]);
+}
+
+function interactReact(id, entering, quiet) {
+  const cfg = interactCfg();
+  const key = id + (entering ? ':in' : ':out');
+  const now = Date.now();
+  if (interactLastAt[key] && now - interactLastAt[key] < INTERACT_COOLDOWN) return false;
+  interactLastAt[key] = now;
+  if (quiet) return true;                       // 隐身时不说话，但冷却照记
+  if (id.indexOf('c:') === 0) {
+    const cu = cfg.custom.find((c) => 'c:' + c.id === id);
+    if (!cu) return false;
+    petSay(entering ? (cu.line || ('「' + cu.name + '」打开了，我在旁边。')) : ('「' + cu.name + '」关掉了。'));
+    return true;
+  }
+  const app = INTERACT_APPS.find((a) => a.id === id);
+  if (!app) return false;
+  interactSay(entering ? app.lines : app.bye);
+  return true;
+}
+
+function interactTest(id) {
+  if (!id) return;
+  if (id === 'bt') {
+    const ev = SYSTEM_EVENTS.find((e) => e.id === 'bt');
+    if (ev) interactSay(btState === 'off' ? ev.linesOff : ev.linesOn);
+    return;
+  }
+  if (id.indexOf('c:') === 0) {
+    const cu = interactCfg().custom.find((c) => 'c:' + c.id === id);
+    petSay(cu ? ('「' + cu.name + '」打开了，我看着呢。') : '这个应用还没配置。');
+    return;
+  }
+  const app = INTERACT_APPS.find((a) => a.id === id);
+  if (app) interactSay(app.lines);
+}
+
+function buildInteractState() {
+  const cfg = interactCfg();
+  const seen = new Set(interactSnapshot.ids || []);
+  return {
+    on: cfg.on !== false,
+    greetBack: cfg.greetBack !== false,
+    apps: INTERACT_APPS.map((a) => ({
+      id: a.id,
+      name: a.name,
+      emoji: a.emoji,
+      desc: a.desc || '',
+      allow: cfg.allow[a.id] === true,
+      running: seen.has(a.id)
+    })),
+    custom: cfg.custom.map((c) => ({
+      id: c.id,
+      name: c.name,
+      keys: c.keys || [],
+      on: c.on !== false,
+      running: seen.has('c:' + c.id)
+    })),
+    system: SYSTEM_EVENTS.map((e) => ({
+      id: e.id,
+      name: e.name,
+      emoji: e.emoji,
+      desc: e.desc || '',
+      allow: e.id === 'bt' ? !!cfg.bt : false,
+      state: e.id === 'bt' ? btState : null
+    }))
+  };
+}
+
+function pushInteract() {
+  if (interactWin && !interactWin.isDestroyed()) {
+    interactWin.webContents.send('interact:state', buildInteractState());
+  }
+  if (tray) tray.setContextMenu(buildTrayMenu());
+}
+
+function startInteractLoop() {
+  if (interactTimer) return;
+  const dbg = !!process.env.PET_INTERACT_LOG;
+  if (dbg) console.log('[interact] 循环启动，每 12 秒读一次窗口标题');
+  interactTimer = setInterval(async () => {
+    let r;
+    try { r = await interactScan(); } catch (err) { return; }
+    const cfg = interactCfg();
+    interactSnapshot = { ids: Array.from(r.running), titles: r.titles, at: Date.now() };
+    if (interactWin && !interactWin.isDestroyed()) interactWin.webContents.send('interact:state', buildInteractState());
+    if (cfg.on === false) { interactPrev = new Set(); return; }
+    const quiet = manualHidden || fsHidden;
+    for (const id of r.matched) {
+      if (!interactPrev.has(id)) {
+        interactReact(id, true, quiet);
+        if (dbg) console.log('[interact] 出现 ' + id + ' ← ' + (r.hit[id] || ''));
+      }
+    }
+    if (cfg.greetBack !== false) {
+      for (const id of interactPrev) {
+        if (!r.matched.has(id)) {
+          interactReact(id, false, quiet);
+          if (dbg) console.log('[interact] 离开 ' + id);
+        }
+      }
+    }
+    interactPrev = r.matched;
+  }, 12000);
+}
+
+/* 蓝牙开关：只读 PnP 适配器状态（Get-PnpDevice 是查询，不改设置）。
+   不同机型上报方式不一样，读不到就保持 unknown，不瞎报。 */
+const BT_STATUS_SCRIPT = [
+  '[Console]::OutputEncoding=[Text.Encoding]::UTF8',
+  "$d = Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -like 'USB\\*' } | Select-Object -First 1",
+  "if (-not $d) { $d = Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -like 'BTH\\MS_BTHBRB*' } | Select-Object -First 1 }",
+  "if ($d) { $d.Status } else { 'none' }"
+].join('\n');
+
+async function btProbe() {
+  const out = String(await execPowerShell(BT_STATUS_SCRIPT, 8000)).trim();
+  if (!out || /^none$/i.test(out)) return 'unknown';
+  return /^ok$/i.test(out) ? 'on' : 'off';
+}
+
+function startBtLoop() {
+  if (interactBtTimer) return;
+  interactBtTimer = setInterval(async () => {
+    const cfg = interactCfg();
+    if (!cfg.bt) return;
+    const st = await btProbe();
+    if (st === 'unknown') return;
+    const changed = btState && st !== btState;
+    btState = st;
+    if (changed && cfg.on !== false && !(manualHidden || fsHidden)) {
+      const ev = SYSTEM_EVENTS.find((e) => e.id === 'bt');
+      if (ev) interactSay(st === 'on' ? ev.linesOn : ev.linesOff);
+    }
+    if (changed && interactWin && !interactWin.isDestroyed()) {
+      interactWin.webContents.send('interact:state', buildInteractState());
+    }
+  }, 45000);
+}
+
+function openInteractPanel() {
+  interactCfg();
+  if (interactWin && !interactWin.isDestroyed()) {
+    interactWin.show();
+    interactWin.focus();
+    interactWin.webContents.send('interact:state', buildInteractState());
+    return;
+  }
+  interactWin = new BrowserWindow({
+    width: 640,
+    height: 780,
+    minWidth: 540,
+    minHeight: 520,
+    frame: false,
+    backgroundColor: '#121020',
+    title: '互动应用',
+    resizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: false,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'interact-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  });
+  interactWin.loadFile(path.join(__dirname, 'interact.html'));
+  interactWin.once('ready-to-show', () => {
+    if (!interactWin || interactWin.isDestroyed()) return;
+    interactWin.show();
+    interactWin.webContents.send('interact:state', buildInteractState());
+    // 打开面板时立刻扫一次，列表里马上能看到"正在运行"
+    interactScan().then((r) => {
+      interactSnapshot = { ids: Array.from(r.running), titles: r.titles, at: Date.now() };
+      if (interactWin && !interactWin.isDestroyed()) interactWin.webContents.send('interact:state', buildInteractState());
+    }).catch(() => {});
+    btProbe().then((st) => {
+      if (st !== 'unknown') btState = st;
+      if (interactWin && !interactWin.isDestroyed()) interactWin.webContents.send('interact:state', buildInteractState());
+    }).catch(() => {});
+  });
+  interactWin.on('closed', () => { interactWin = null; });
 }
 
 /* ---------- 联动：状态缓存到本地，重启后先显示上次的数字 ---------- */
@@ -1699,6 +1970,11 @@ function buildTrayMenu() {
       click: (it) => { setWander(it.checked); } },
     { label: '学习模式（打开猿编程自动变身）', type: 'checkbox', checked: settings.study !== false,
       click: (it) => { setStudy(it.checked); } },
+    { label: '互动应用', submenu: [
+      { label: '选择会搭理的应用…', click: () => openInteractPanel() },
+      { label: '互动总开关', type: 'checkbox', checked: interactCfg().on !== false,
+        click: (it) => { interactCfg().on = it.checked; saveSettings(); pushInteract(); } }
+    ] },
     { type: 'separator' },
     { label: '重启小机器人（Ctrl+Alt+R）', click: () => restartApp() },
     { label: '退出', click: () => { quitting = true; app.quit(); } }
@@ -1752,6 +2028,72 @@ ipcMain.on('pet:always-top', (e, v) => {
 });
 
 ipcMain.on('pet:quit', () => { quitting = true; app.quit(); });
+
+/* ---------- 互动应用面板 IPC ---------- */
+ipcMain.handle('interact:get', async () => {
+  try {
+    const r = await interactScan();
+    interactSnapshot = { ids: Array.from(r.running), titles: r.titles, at: Date.now() };
+  } catch (err) { /* 用上一次的快照 */ }
+  return buildInteractState();
+});
+
+ipcMain.on('interact:set-on', (e, v) => {
+  interactCfg().on = !!v;
+  saveSettings();
+  pushInteract();
+});
+
+ipcMain.on('interact:set-app', (e, p) => {
+  if (!p || !p.id) return;
+  const cfg = interactCfg();
+  const id = String(p.id);
+  const on = !!p.on;
+  if (id.indexOf('c:') === 0) {
+    const cu = cfg.custom.find((c) => 'c:' + c.id === id);
+    if (cu) cu.on = on;
+  } else if (id === 'bt') {
+    cfg.bt = on;
+    if (on) {
+      btProbe().then((st) => { if (st !== 'unknown') btState = st; pushInteract(); }).catch(() => {});
+    }
+  } else if (INTERACT_APPS.some((a) => a.id === id)) {
+    cfg.allow[id] = on;
+  }
+  saveSettings();
+  pushInteract();
+});
+
+ipcMain.on('interact:test', (e, id) => { interactTest(String(id || '')); });
+
+ipcMain.on('interact:add', (e, data) => {
+  const cfg = interactCfg();
+  const name = String((data && data.name) || '').trim().slice(0, 20);
+  if (!name) return;
+  const keys = (Array.isArray(data.keys) ? data.keys : [])
+    .map((k) => String(k || '').trim().slice(0, 30))
+    .filter(Boolean)
+    .slice(0, 5);
+  cfg.custom.push({
+    id: 'u' + Date.now().toString(36),
+    name,
+    keys: keys.length ? keys : [name],
+    on: true
+  });
+  saveSettings();
+  pushInteract();
+});
+
+ipcMain.on('interact:del', (e, id) => {
+  const cfg = interactCfg();
+  cfg.custom = cfg.custom.filter((c) => 'c:' + c.id !== String(id || ''));
+  saveSettings();
+  pushInteract();
+});
+
+ipcMain.on('interact:close', () => {
+  if (interactWin && !interactWin.isDestroyed()) interactWin.close();
+});
 
 /* ---------- 联动 IPC ---------- */
 ipcMain.on('pet:link-request', () => broadcastLink());
@@ -1815,6 +2157,11 @@ ipcMain.on('pet:menu', (e, st) => {
       click: (it) => { setWander(it.checked); } },
     { label: '学习模式（打开猿编程自动变身）', type: 'checkbox', checked: settings.study !== false,
       click: (it) => { setStudy(it.checked); } },
+    { label: '互动应用', submenu: [
+      { label: '选择会搭理的应用…', click: () => openInteractPanel() },
+      { label: '互动总开关', type: 'checkbox', checked: interactCfg().on !== false,
+        click: (it) => { interactCfg().on = it.checked; saveSettings(); pushInteract(); } }
+    ] },
     { type: 'separator' },
     { label: '陪看模式（看 B 站时自动记录）', type: 'checkbox', checked: settings.watchMode, click: () => toggleWatch() },
     watchReportItem(),
@@ -1860,8 +2207,11 @@ function boot() {
     startCursorLoop();
     startPeekLoop();
     startStudyLoop();
-    // 调试用：PET_WANDER=1 启动即进入游荡
+    startInteractLoop();
+    startBtLoop();
+    // 调试用：PET_WANDER=1 启动即进入游荡；PET_OPEN_INTERACT=1 启动就打开互动面板
     if (process.env.PET_WANDER) setTimeout(() => setWander(true), 1200);
+    if (process.env.PET_OPEN_INTERACT) setTimeout(() => openInteractPanel(), 1500);
     startSysLoop();
     startFullscreenWatch();
     startWatchLoop();

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>互动应用</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #121020;
+    --panel: #1b1830;
+    --panel-2: #221e3a;
+    --line: rgba(139,124,255,.16);
+    --text: #ece9ff;
+    --dim: #9d97bd;
+    --accent: #8b7cff;
+    --accent-2: #5ee0c0;
+  }
+  html, body { height: 100%; }
+  body {
+    background: radial-gradient(120% 80% at 50% -10%, #241f45 0%, var(--bg) 55%, #0c0a16 100%);
+    color: var(--text);
+    font: 13px/1.5 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
+    user-select: none;
+  }
+  /* ---------- 标题栏 ---------- */
+  header {
+    -webkit-app-region: drag;
+    padding: 16px 18px 12px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  header .ttl { flex: 1; }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .5px; }
+  header p { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
+  #close {
+    -webkit-app-region: no-drag;
+    width: 26px; height: 26px; border-radius: 8px;
+    border: 1px solid var(--line); background: rgba(255,255,255,.04);
+    color: var(--dim); font-size: 13px; cursor: pointer;
+  }
+  #close:hover { color: #fff; background: rgba(255,90,120,.25); border-color: rgba(255,90,120,.4); }
+
+  /* 总开关 */
+  .master { display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
+  .master span { font-size: 11.5px; color: var(--dim); }
+
+  /* ---------- 开关控件 ---------- */
+  .sw { position: relative; width: 38px; height: 21px; flex: none; cursor: pointer; }
+  .sw input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .sw i {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: rgba(255,255,255,.12); transition: background .18s;
+    border: 1px solid rgba(255,255,255,.08);
+  }
+  .sw i::after {
+    content: ""; position: absolute; width: 15px; height: 15px; border-radius: 50%;
+    left: 2px; top: 2px; background: #cfc9ee; transition: transform .18s, background .18s;
+    box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  .sw input:checked + i { background: linear-gradient(135deg, #7b68ff, #9d8cff); border-color: rgba(160,140,255,.7); }
+  .sw input:checked + i::after { transform: translateX(17px); background: #fff; }
+  .sw input:disabled + i { opacity: .4; }
+
+  /* ---------- 内容区 ---------- */
+  main { height: calc(100% - 78px); overflow-y: auto; padding: 14px 16px 24px; }
+  main::-webkit-scrollbar { width: 8px; }
+  main::-webkit-scrollbar-thumb { background: rgba(139,124,255,.25); border-radius: 8px; }
+
+  .card {
+    background: linear-gradient(180deg, rgba(34,30,58,.92), rgba(24,21,42,.92));
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 6px 4px;
+    margin-bottom: 14px;
+  }
+  .card > h2 {
+    font-size: 11.5px; font-weight: 600; letter-spacing: .8px;
+    color: var(--dim); text-transform: uppercase;
+    padding: 10px 14px 8px; display: flex; align-items: center; gap: 8px;
+  }
+  .card > h2 em { font-style: normal; color: var(--accent); font-size: 11px; }
+
+  .row {
+    display: flex; align-items: center; gap: 11px;
+    padding: 9px 14px; border-radius: 10px;
+  }
+  .row:hover { background: rgba(139,124,255,.07); }
+  .row + .row { border-top: 1px solid rgba(255,255,255,.04); }
+  .ava {
+    width: 30px; height: 30px; border-radius: 9px; flex: none;
+    display: grid; place-items: center; font-size: 15px;
+    background: rgba(139,124,255,.12); border: 1px solid rgba(139,124,255,.18);
+  }
+  .meta { flex: 1; min-width: 0; }
+  .meta b { font-size: 13px; font-weight: 600; }
+  .meta small { display: block; color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag {
+    font-size: 10px; padding: 1px 6px; border-radius: 999px; margin-left: 6px;
+    color: var(--accent-2); background: rgba(94,224,192,.12); border: 1px solid rgba(94,224,192,.25);
+    vertical-align: 1px;
+  }
+  .try {
+    flex: none; border: 1px solid var(--line); background: rgba(255,255,255,.03);
+    color: var(--dim); font-size: 11px; padding: 3px 9px; border-radius: 8px; cursor: pointer;
+    font-family: inherit;
+  }
+  .try:hover { color: var(--text); border-color: rgba(139,124,255,.5); background: rgba(139,124,255,.14); }
+  .del {
+    flex: none; border: 0; background: transparent; color: #7d7796; font-size: 14px;
+    cursor: pointer; padding: 2px 6px; border-radius: 6px;
+  }
+  .del:hover { color: #ff7a92; background: rgba(255,90,120,.12); }
+
+  /* 自定义添加 */
+  .adder { display: flex; gap: 8px; padding: 8px 14px 12px; }
+  .adder input {
+    flex: 1; min-width: 0; background: rgba(0,0,0,.28); border: 1px solid var(--line);
+    color: var(--text); border-radius: 9px; padding: 7px 10px; font: inherit; font-size: 12px;
+    outline: none;
+  }
+  .adder input:focus { border-color: rgba(139,124,255,.6); box-shadow: 0 0 0 2px rgba(139,124,255,.12); }
+  .adder input::placeholder { color: #6f6a8c; }
+  .adder button {
+    flex: none; border: 0; border-radius: 9px; padding: 0 14px; cursor: pointer;
+    background: linear-gradient(135deg, #7b68ff, #9d8cff); color: #fff; font: inherit; font-size: 12px;
+  }
+  .adder button:active { transform: translateY(1px); }
+
+  .empty { color: #6f6a8c; font-size: 11.5px; padding: 6px 14px 12px; }
+  footer { padding: 0 18px 14px; color: #6f6a8c; font-size: 10.5px; line-height: 1.7; }
+  footer b { color: #8a84a8; font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <div class="ttl">
+    <h1>互动应用</h1>
+    <p>勾选哪些应用出现时，小机器人会主动搭理 · 只读窗口标题</p>
+  </div>
+  <div class="master">
+    <span>总开关</span>
+    <label class="sw"><input type="checkbox" id="master"><i></i></label>
+  </div>
+  <button id="close" title="关闭">✕</button>
+</header>
+
+<main>
+  <section class="card" id="liveCard" style="display:none">
+    <h2>正在运行 <em id="liveCount"></em></h2>
+    <div id="liveList"></div>
+  </section>
+
+  <section class="card">
+    <h2>应用列表</h2>
+    <div id="appList"></div>
+  </section>
+
+  <section class="card">
+    <h2>自定义应用</h2>
+    <div id="customList"></div>
+    <div class="adder">
+      <input id="cName" placeholder="应用名（如：我的笔记）" maxlength="20">
+      <input id="cKey" placeholder="窗口标题关键词（如：Notion）" maxlength="30">
+      <button id="cAdd">添加</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>系统事件</h2>
+    <div id="sysList"></div>
+  </section>
+</main>
+
+<footer>
+  <b>怎么判断的：</b>每 12 秒只读取一次窗口标题，看到白名单里的应用就打个招呼。<br>
+  <b>不会做什么：</b>不截图窗口内容、不模拟点击、不发按键，也没有任何操作其他软件的能力。<br>
+  <b>防打扰：</b>同一个应用 8 分钟内只打招呼一次；关掉总开关就完全安静。
+</footer>
+
+<script>
+  var api = window.InteractHost;
+  var state = null;
+  var main = document.querySelector('main');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function swHtml(id, on, disabled) {
+    return '<label class="sw"><input type="checkbox" data-id="' + esc(id) + '"' +
+      (on ? ' checked' : '') + (disabled ? ' disabled' : '') + '><i></i></label>';
+  }
+
+  function rowHtml(app, isLive) {
+    return '<div class="row">' +
+      '<div class="ava">' + esc(app.emoji || '🧩') + '</div>' +
+      '<div class="meta"><b>' + esc(app.name) + '</b>' +
+        (isLive ? '<span class="tag">运行中</span>' : '') +
+        '<small>' + esc(app.desc || '') + '</small></div>' +
+      '<button class="try" data-try="' + esc(app.id) + '">试一下</button>' +
+      swHtml(app.id, !!app.allow) +
+    '</div>';
+  }
+
+  function render() {
+    if (!state) return;
+    var keep = main.scrollTop;
+    document.getElementById('master').checked = !!state.on;
+
+    // 正在运行
+    var running = (state.apps || []).filter(function (a) { return a.running; });
+    var liveCard = document.getElementById('liveCard');
+    var liveList = document.getElementById('liveList');
+    if (running.length) {
+      liveCard.style.display = '';
+      document.getElementById('liveCount').textContent = running.length + ' 个';
+      liveList.innerHTML = running.map(function (a) { return rowHtml(a, true); }).join('');
+    } else {
+      liveCard.style.display = 'none';
+      liveList.innerHTML = '';
+    }
+
+    // 应用列表
+    document.getElementById('appList').innerHTML = (state.apps || []).map(function (a) {
+      return rowHtml(a, false);
+    }).join('') || '<div class="empty">还没有可选应用</div>';
+
+    // 自定义
+    var cl = document.getElementById('customList');
+    if (!state.custom || !state.custom.length) {
+      cl.innerHTML = '<div class="empty">还没有自定义应用。填个名字和关键词就行，比如 Notion。</div>';
+    } else {
+      cl.innerHTML = state.custom.map(function (c) {
+        return '<div class="row">' +
+          '<div class="ava">🧩</div>' +
+          '<div class="meta"><b>' + esc(c.name) + '</b>' +
+          '<small>关键词：' + esc((c.keys || []).join(' / ') || c.name) + (c.running ? ' · 正在运行' : '') + '</small></div>' +
+          '<button class="try" data-try="c:' + esc(c.id) + '">试一下</button>' +
+          swHtml('c:' + c.id, c.on !== false) +
+          '<button class="del" data-del="' + esc(c.id) + '" title="删除">✕</button>' +
+        '</div>';
+      }).join('');
+    }
+
+    // 系统事件
+    var sys = state.system || [];
+    document.getElementById('sysList').innerHTML = sys.map(function (s) {
+      var st = s.state === 'on' ? ' · 当前：开' : (s.state === 'off' ? ' · 当前：关' : (s.state === 'unknown' ? ' · 读不到开关状态' : ''));
+      return '<div class="row">' +
+        '<div class="ava">' + esc(s.emoji || '⚙️') + '</div>' +
+        '<div class="meta"><b>' + esc(s.name) + '</b><small>' + esc(s.desc || '') + esc(st) + '</small></div>' +
+        swHtml(s.id, !!s.allow) +
+      '</div>';
+    }).join('') || '<div class="empty">暂无可用的系统事件</div>';
+
+    main.scrollTop = keep;
+  }
+
+  function apply(s) { state = s; render(); }
+
+  api.get().then(apply);
+  api.onState(apply);
+
+  document.getElementById('master').addEventListener('change', function (e) {
+    api.setOn(e.target.checked);
+  });
+
+  main.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t && t.type === 'checkbox' && t.dataset.id) api.setApp(t.dataset.id, t.checked);
+  });
+
+  main.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t) return;
+    if (t.dataset && t.dataset.try) { api.test(t.dataset.try); return; }
+    if (t.dataset && t.dataset.del) { api.del(t.dataset.del); }
+  });
+
+  document.getElementById('cAdd').addEventListener('click', function () {
+    var name = document.getElementById('cName').value.trim();
+    var key = document.getElementById('cKey').value.trim();
+    if (!name) { document.getElementById('cName').focus(); return; }
+    api.add({ name: name, keys: key ? [key] : [name] });
+    document.getElementById('cName').value = '';
+    document.getElementById('cKey').value = '';
+  });
+
+  document.getElementById('close').addEventListener('click', function () { api.close(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') api.close();
+  });
+</script>
+</body>
+</html>
