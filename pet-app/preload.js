@@ -29,6 +29,13 @@ contextBridge.exposeInMainWorld('PetHost', {
   // ---- 皮肤（主进程把设置里的皮肤推给页面） ----
   onSkin: (cb) => ipcRenderer.on('pet:skin', (e, id) => cb(id)),
 
+  // ---- 游荡模式 ----
+  onWander: (cb) => ipcRenderer.on('pet:wander', (e, v) => cb(v)),
+  setWander: (v) => ipcRenderer.send('pet:wander-state', v),
+
+  // ---- 游荡时"看见"了什么窗口（只读标题，主进程已做安全过滤） ----
+  onPeek: (cb) => ipcRenderer.on('pet:peek', (e, p) => cb(p)),
+
   // ---- 主进程让它说句话 ----
   onSay: (cb) => ipcRenderer.on('pet:say', (e, t) => cb(t)),
 

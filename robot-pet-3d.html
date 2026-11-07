@@ -822,6 +822,7 @@
       'translate3d(' + (cur.x * 1.6).toFixed(2) + 'px,8px,-3px) rotateY(' + (yaw * 0.12).toFixed(2) + 'deg)';
 
     if (following && !dragging) stepFollow(now, dt);
+    else if (wandering && !dragging) stepWander(now, dt);
 
     requestAnimationFrame(frame);
   }
@@ -913,6 +914,128 @@
       'translate3d(0,' + (-arc).toFixed(2) + 'px,0)' +
       ' scale(' + (1 - sq).toFixed(3) + ',' + (1 + sq).toFixed(3) + ')' +
       ' rotate(' + tilt.toFixed(2) + 'deg)';
+  }
+
+  /* ============ 游荡：自己在桌面上溜达 ============ */
+  var wandering = false;
+  var wander = { tx: 0, ty: 0, restUntil: 0, speed: 0, phase: 0 };
+
+  function wanderBounds() {
+    var b = visualBox();
+    return {
+      minX: VIEW.x0 - b.ox,
+      maxX: VIEW.x1 - b.ox - b.w,
+      minY: VIEW.y0 - b.oy,
+      maxY: VIEW.y1 - b.oy - b.h
+    };
+  }
+
+  function pickWanderTarget() {
+    var bb = wanderBounds();
+    var x, y;
+    if (Math.random() < 0.6) {
+      // 贴着左右两边溜达，像真的在巡边
+      var leftSide = Math.random() < 0.5;
+      x = leftSide ? bb.minX + 6 + Math.random() * 70 : bb.maxX - 6 - Math.random() * 70;
+      y = bb.minY + Math.random() * Math.max(10, bb.maxY - bb.minY);
+    } else {
+      x = bb.minX + Math.random() * Math.max(10, bb.maxX - bb.minX);
+      y = bb.maxY - Math.random() * Math.max(10, Math.min(140, bb.maxY - bb.minY));
+    }
+    x = clamp(x, bb.minX, bb.maxX);
+    y = clamp(y, bb.minY, bb.maxY);
+    // 太近就换一头，避免原地打转
+    if (Math.hypot(x - pos.x, y - pos.y) < 90) {
+      var away = pos.x > (bb.minX + bb.maxX) / 2 ? -1 : 1;
+      x = clamp(pos.x + away * (150 + Math.random() * 220), bb.minX, bb.maxX);
+      y = clamp(bb.minY + Math.random() * Math.max(10, bb.maxY - bb.minY), bb.minY, bb.maxY);
+    }
+    wander.tx = x;
+    wander.ty = y;
+  }
+
+  function stepWander(now, dt) {
+    if (dragging) return;
+    // 光标落在身上就站住，不然右键点不到
+    if (hitTest(mouse.x - pos.x, mouse.y - pos.y)) {
+      wander.speed *= Math.max(0, 1 - dt * 10);
+      robot.style.transform = 'translate3d(0,0,0)';
+      return;
+    }
+    if (wander.restUntil && now < wander.restUntil) {
+      wander.speed *= Math.max(0, 1 - dt * 8);
+      var arcR = Math.abs(Math.sin(wander.phase)) * 2 * clamp(wander.speed / 200, 0, 1);
+      robot.style.transform = 'translate3d(0,' + (-arcR).toFixed(2) + 'px,0)';
+      return;
+    }
+
+    var dx = wander.tx - pos.x, dy = wander.ty - pos.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 8) {
+      pickWanderTarget();
+      wander.restUntil = now + 700 + Math.random() * 2800;   // 走一段，停一会儿
+      return;
+    }
+
+    var px0 = pos.x, py0 = pos.y;
+    var v = Math.min(300, 55 + dist * 1.4);                   // 慢悠悠，不抢镜
+    var stepLen = v * dt;
+    if (stepLen >= dist) { pos.x = wander.tx; pos.y = wander.ty; }
+    else { pos.x += (dx / dist) * stepLen; pos.y += (dy / dist) * stepLen; }
+    clampPos();
+    applyPos();
+
+    var moved = Math.hypot(pos.x - px0, pos.y - py0);
+    var spd = moved / dt;
+    wander.speed += (spd - wander.speed) * 0.35;
+    wander.phase += moved * 0.09;
+    if (wander.phase > 1e6) wander.phase = 0;
+
+    var run = clamp(wander.speed / 260, 0, 1);
+    var arc = Math.abs(Math.sin(wander.phase)) * 7 * run;
+    var sq = Math.sin(wander.phase * 2) * 0.03 * run;
+    var tilt = clamp(((pos.x - px0) / dt) * 0.006, -6, 6);
+    robot.style.transform =
+      'translate3d(0,' + (-arc).toFixed(2) + 'px,0)' +
+      ' scale(' + (1 - sq).toFixed(3) + ',' + (1 + sq).toFixed(3) + ')' +
+      ' rotate(' + tilt.toFixed(2) + 'deg)';
+  }
+
+  function setWander(on, silent) {
+    wandering = !!on;
+    if (wandering) {
+      if (following) setFollow(false);
+      pickWanderTarget();
+      wander.restUntil = 0;
+      wander.speed = 0;
+      if (!silent) say('我出去转转～');
+    } else {
+      wander.restUntil = 0;
+      wander.speed = 0;
+      resetFollowMotion();
+      if (!silent) say('回来待命。');
+    }
+    if (HOST && HOST.setWander) HOST.setWander(wandering);
+  }
+
+  /* 主进程"看见"了什么窗口：只做表情和台词，不碰任何其他程序 */
+  function onPeek(p) {
+    if (!p || !wandering) return;
+    if (p.kind === 'friend') {
+      wander.restUntil = performance.now() + 3600;
+      wander.speed = 0;
+      // 抬头朝屏幕中间张望一下
+      target.x = clamp((VIEW.x1 / 2 - (pos.x + PET_W / 2)) / 500, -1, 1);
+      target.y = clamp((VIEW.y1 / 2 - (pos.y + 160)) / 600, -1, 1);
+      if (p.line) say(p.line);
+    } else if (p.kind === 'danger') {
+      // 禁区：一声不响，悄悄挪到另一头去
+      var bb = wanderBounds();
+      var goLeft = pos.x > (bb.minX + bb.maxX) / 2;
+      wander.tx = goLeft ? bb.minX + 8 : bb.maxX - 8;
+      wander.ty = clamp(pos.y, bb.minY, bb.maxY);
+      wander.restUntil = 0;
+    }
   }
 
   /* ============ 交互 ============ */
@@ -1746,6 +1869,8 @@
         updateAim();
       });
       HOST.onFollow(function (v) { if (v !== following) setFollow(v); });
+      if (HOST.onWander) HOST.onWander(function (v) { if (v !== wandering) setWander(v, true); });
+      if (HOST.onPeek) HOST.onPeek(onPeek);
       HOST.onTop(function (v) { alwaysTop = v; syncMenu(); });
       HOST.onReset(resetPos);
       HOST.onLink(onLink);

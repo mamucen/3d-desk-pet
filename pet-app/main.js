@@ -92,7 +92,7 @@ const state = { follow: false, top: true };
 let link = { online: false, state: null, appUrl: DEFAULT_APP_URL };
 let stateFile = '';
 let settingsFile = '';
-const settings = { autoStart: false, autoHide: true, watchMode: true, skin: 'robot' };
+const settings = { autoStart: false, autoHide: true, watchMode: true, skin: 'robot', wander: false };
 
 /* ---------- 皮肤 ---------- */
 const SKINS = [
@@ -159,6 +159,7 @@ function loadSettings() {
         if (typeof raw.autoHide === 'boolean') settings.autoHide = raw.autoHide;
         if (typeof raw.watchMode === 'boolean') settings.watchMode = raw.watchMode;
         if (typeof raw.skin === 'string' && raw.skin) settings.skin = raw.skin;
+        if (typeof raw.wander === 'boolean') settings.wander = raw.wander;
       }
     }
   } catch (err) { /* 用默认值 */ }
@@ -283,6 +284,7 @@ function createWindow() {
     });
     win.webContents.send('pet:link', link);
     win.webContents.send('pet:skin', settings.skin || 'robot');
+    win.webContents.send('pet:wander', settings.wander);
 
     // 调试：PET_DEBUG_SHOT=毫秒数 时自动截一张渲染画面（默认 1800ms）
     if (process.env.PET_DEBUG_SHOT) {
@@ -563,6 +565,108 @@ function startCursorLoop() {
       });
     } catch (e) { /* ignore */ }
   }, 16);
+}
+
+/* ---------- 游荡模式：只"看"，绝不动 ----------
+   这里只调用 desktopCapturer 读取窗口标题（纯读取，没有任何副作用），
+   不模拟点击、不发送按键、不调用任何会改变其他程序状态的接口。
+   所以它从架构上就不具备"操作其他软件"的能力。 */
+const PEEK_NEVER = [
+  '防火墙', 'Windows 安全', '安全中心', '病毒和威胁', 'Defender', 'SmartScreen',
+  '用户账户控制', 'UAC', '注册表', 'regedit', '组策略', 'BitLocker',
+  '磁盘管理', '设备管理器', '系统配置', 'msconfig', '控制面板',
+  '凭据', '密码', '支付', '付款', '银行', '转账', '钱包',
+  '格式化', '卸载', 'Windows 更新', '任务管理器',
+  // 终端里可能正在跑重要命令，也不去凑热闹
+  '命令提示符', 'PowerShell', 'pwsh', 'cmd.exe', 'Terminal', '终端'
+];
+
+const PEEK_FRIEND = [
+  { keys: ['蓝牙', 'Bluetooth'], lines: ['蓝牙还开着呢，耳机连上了吗？', '好像有人忘了关蓝牙。'] },
+  { keys: ['微信', 'Weixin', 'WeChat'], lines: ['有人找你吗？我不看内容。', '消息好多呀。'] },
+  { keys: ['QQ', '钉钉', '飞书', 'Slack', 'Teams'], lines: ['在忙工作呀。', '这个窗口我认得。'] },
+  { keys: ['网易云', 'QQ音乐', 'Spotify', '音乐'], lines: ['在听歌呀，我不吵你。', '这首好听吗？'] },
+  { keys: ['Chrome', 'Edge', 'Firefox', '浏览器'], lines: ['标签页是不是又开了一堆…', '又在网上逛呢。'] },
+  { keys: ['VS Code', 'Visual Studio', 'IntelliJ', 'Cursor', '编辑器'], lines: ['在写代码呀，那我安静点。', '这个我熟。'] },
+  { keys: ['Steam', 'Minecraft', '游戏'], lines: ['玩得开心点！', '这游戏看着不错。'] },
+  { keys: ['下载', '迅雷', 'IDM'], lines: ['在下东西？我等等。', '网速还行。'] },
+  { keys: ['邮件', 'Outlook', 'Foxmail'], lines: ['有邮件来了吗？', '又是工作邮件…'] }
+];
+
+let peekTimer = null;
+
+function classifyWindow(title) {
+  const t = String(title || '');
+  if (!t) return null;
+  for (const k of PEEK_NEVER) {
+    if (t.indexOf(k) >= 0) return { kind: 'danger', title: t };
+  }
+  for (const g of PEEK_FRIEND) {
+    for (const k of g.keys) {
+      if (t.indexOf(k) >= 0) {
+        return { kind: 'friend', title: t, line: g.lines[Math.floor(Math.random() * g.lines.length)] };
+      }
+    }
+  }
+  return null;
+}
+
+async function peekOnce() {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['window'],
+      thumbnailSize: { width: 0, height: 0 },
+      fetchWindowIcons: false
+    });
+    const titles = [];
+    for (const s of sources) {
+      const n = String(s.name || '');
+      if (!n || n.indexOf('小机器人') >= 0) continue;   // 跳过自己
+      titles.push(n);
+    }
+    // 禁区优先：屏幕上只要出现敏感窗口，就先躲开，不做任何好奇行为
+    if (process.env.PET_WANDER_LOG) {
+      console.log('[peek] 看到 ' + titles.length + ' 个窗口: ' + titles.slice(0, 6).join(' / '));
+    }
+    for (const t of titles) {
+      const hit = classifyWindow(t);
+      if (hit && hit.kind === 'danger') return hit;
+    }
+    const friends = [];
+    for (const t of titles) {
+      const hit = classifyWindow(t);
+      if (hit && hit.kind === 'friend') friends.push(hit);
+    }
+    if (!friends.length) return null;
+    return friends[Math.floor(Math.random() * friends.length)];
+  } catch (err) {
+    return null;
+  }
+}
+
+function startPeekLoop() {
+  if (peekTimer) return;
+  let first = true;
+  peekTimer = setInterval(async () => {
+    if (first) { first = false; return; }          // 刚启动先别急着东张西望
+    if (!settings.wander) return;
+    if (manualHidden || fsHidden) return;
+    if (!win || win.isDestroyed()) return;
+    const hit = await peekOnce();
+    if (process.env.PET_WANDER_LOG) {
+      console.log('[peek] ' + (hit ? hit.kind + ' | ' + hit.title : 'none'));
+    }
+    if (hit && win && !win.isDestroyed()) {
+      win.webContents.send('pet:peek', { kind: hit.kind, line: hit.line || '', title: hit.title });
+    }
+  }, 20000);
+}
+
+function setWander(on) {
+  settings.wander = !!on;
+  saveSettings();
+  if (win && !win.isDestroyed()) win.webContents.send('pet:wander', settings.wander);
+  if (tray) tray.setContextMenu(buildTrayMenu());
 }
 
 /* ---------- 联动：状态缓存到本地，重启后先显示上次的数字 ---------- */
@@ -1447,6 +1551,8 @@ function buildTrayMenu() {
       } },
     { label: '开机自启（随 Windows 启动）', type: 'checkbox', checked: settings.autoStart,
       click: (it) => { applyAutoStart(it.checked); } },
+    { label: '游荡模式（在桌面上到处走走）', type: 'checkbox', checked: settings.wander,
+      click: (it) => { setWander(it.checked); } },
     { type: 'separator' },
     { label: '重启小机器人（Ctrl+Alt+R）', click: () => restartApp() },
     { label: '退出', click: () => { quitting = true; app.quit(); } }
@@ -1465,18 +1571,28 @@ function createTray() {
 }
 
 /* ---------- IPC ---------- */
+let moveLogAt = 0;
 ipcMain.on('pet:move', (e, x, y) => {
   if (!win || win.isDestroyed()) return;
   const xi = Math.round(Number(x) || 0);
   const yi = Math.round(Number(y) || 0);
   const b = win.getBounds();
-  if (b.x !== xi || b.y !== yi) win.setPosition(xi, yi);
+  if (b.x !== xi || b.y !== yi) {
+    win.setPosition(xi, yi);
+    // 调试用：PET_WANDER_LOG=1 时把移动轨迹打到控制台
+    if (process.env.PET_WANDER_LOG) {
+      const now = Date.now();
+      if (now - moveLogAt > 1500) { moveLogAt = now; console.log('[wander] pos ' + xi + ',' + yi); }
+    }
+  }
 });
 
 ipcMain.on('pet:clickthrough', (e, v) => {
   if (!win || win.isDestroyed()) return;
   try { win.setIgnoreMouseEvents(!!v, { forward: !!v }); } catch (err) { /* ignore */ }
 });
+
+ipcMain.on('pet:wander-state', (e, v) => { setWander(!!v); });
 
 ipcMain.on('pet:follow-state', (e, v) => {
   state.follow = !!v;
@@ -1549,6 +1665,8 @@ ipcMain.on('pet:menu', (e, st) => {
     { label: '皮肤', submenu: skinSubmenu() },
     { label: '开机自启（随 Windows 启动）', type: 'checkbox', checked: settings.autoStart,
       click: (it) => { applyAutoStart(it.checked); } },
+    { label: '游荡模式（在桌面上到处走走）', type: 'checkbox', checked: settings.wander,
+      click: (it) => { setWander(it.checked); } },
     { type: 'separator' },
     { label: '陪看模式（看 B 站时自动记录）', type: 'checkbox', checked: settings.watchMode, click: () => toggleWatch() },
     watchReportItem(),
@@ -1592,6 +1710,9 @@ function boot() {
     // 便携版被移动/改名后，注册表里的旧路径会失效；自启开着就重写一次，自愈
     if (settings.autoStart) applyAutoStart(true);
     startCursorLoop();
+    startPeekLoop();
+    // 调试用：PET_WANDER=1 启动即进入游荡
+    if (process.env.PET_WANDER) setTimeout(() => setWander(true), 1200);
     startSysLoop();
     startFullscreenWatch();
     startWatchLoop();
