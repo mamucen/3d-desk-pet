@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('PetHost', {
 
   // ---- 皮肤（主进程把设置里的皮肤推给页面） ----
   onSkin: (cb) => ipcRenderer.on('pet:skin', (e, id) => cb(id)),
+  onSkinUnlock: (cb) => ipcRenderer.on('pet:skin-unlock', () => cb()),
 
   // ---- 游荡模式 ----
   onWander: (cb) => ipcRenderer.on('pet:wander', (e, v) => cb(v)),

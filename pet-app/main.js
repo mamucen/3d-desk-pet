@@ -92,7 +92,7 @@ const state = { follow: false, top: true };
 let link = { online: false, state: null, appUrl: DEFAULT_APP_URL };
 let stateFile = '';
 let settingsFile = '';
-const settings = { autoStart: false, autoHide: true, watchMode: true, skin: 'robot', wander: false, study: true };
+const settings = { autoStart: false, autoHide: true, watchMode: true, skin: 'robot', wander: false, study: true, ybcUnlocked: false };
 
 /* ---------- 皮肤 ---------- */
 const SKINS = [
@@ -105,22 +105,36 @@ const SKINS = [
   { id: 'samurai', name: '武士喵' },
   { id: 'hotpot',  name: '火锅喵' },
   { id: 'deepsea', name: '深海喵' },
-  { id: 'ghost',   name: '夜光喵' }
+  { id: 'ghost',   name: '夜光喵' },
+  { id: 'ybc',     name: '猿编程喵', locked: true }   // 隐藏款：打开猿编程才解锁
 ];
 function applySkinChoice(id) {
   if (!SKINS.some((s) => s.id === id)) id = 'robot';
+  // 隐藏款守卫：没解锁时，菜单/外部接口都换不上
+  if (id === 'ybc' && !settings.ybcUnlocked) {
+    petSay('「猿编程喵」是隐藏款！打开猿编程写一次代码就能解锁。');
+    return;
+  }
   settings.skin = id;
   saveSettings();
   if (win && !win.isDestroyed()) win.webContents.send('pet:skin', id);
   if (tray) tray.setContextMenu(buildTrayMenu());
 }
 function skinSubmenu() {
-  return SKINS.map((s) => ({
-    label: s.name,
-    type: 'checkbox',
-    checked: (settings.skin || 'robot') === s.id,
-    click: () => applySkinChoice(s.id)
-  }));
+  return SKINS.map((s) => {
+    if (s.locked && !settings.ybcUnlocked) {
+      return {
+        label: '猿编程喵 🔒（打开猿编程解锁）',
+        click: () => petSay('这是隐藏款「猿编程喵」！打开猿编程写一次代码就会解锁。')
+      };
+    }
+    return {
+      label: s.name,
+      type: 'checkbox',
+      checked: (settings.skin || 'robot') === s.id,
+      click: () => applySkinChoice(s.id)
+    };
+  });
 }
 
 /* ---------- 待同步队列（outbox） ----------
@@ -165,6 +179,7 @@ function loadSettings() {
         if (typeof raw.skin === 'string' && raw.skin) settings.skin = raw.skin;
         if (typeof raw.wander === 'boolean') settings.wander = raw.wander;
         if (typeof raw.study === 'boolean') settings.study = raw.study;
+        if (typeof raw.ybcUnlocked === 'boolean') settings.ybcUnlocked = raw.ybcUnlocked;
       }
     }
   } catch (err) { /* 用默认值 */ }
@@ -744,6 +759,17 @@ function setStudyActive(on, quiet) {
   studyActive = on;
   if (on) {
     studyPrevSkin = settings.skin || 'robot';
+    // 首次检测到猿编程：解锁隐藏款「猿编程喵」并当场穿上！
+    if (!settings.ybcUnlocked) {
+      settings.ybcUnlocked = true;
+      saveSettings();
+      if (win && !win.isDestroyed()) win.webContents.send('pet:skin-unlock');
+      applySkinChoice('ybc');
+      if (!quiet && win && !win.isDestroyed()) {
+        petSay('叮！隐藏款「猿编程喵」解锁！这是给你打开猿编程的奖励，以后学习模式它都陪你。');
+      }
+      return;
+    }
     applySkinChoice(STUDY_SKIN);
     if (!quiet && win && !win.isDestroyed()) {
       petSay(STUDY_LINES_ENTER[Math.floor(Math.random() * STUDY_LINES_ENTER.length)]);

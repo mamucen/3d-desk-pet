@@ -92,5 +92,18 @@
     "h": 768,
     "out": "ghost.jpg",
     "imgExt": ".jpg"
+  },
+  {
+    "id": "ybc",
+    "name": "猿编程喵",
+    "rarity": "限定",
+    "file": "AI生成-猿编程喵（以stellar.png为画风参考）",
+    "theme": "#8b7cff",
+    "w": 512,
+    "h": 768,
+    "out": "ybc.jpg",
+    "imgExt": ".jpg",
+    "locked": true,
+    "unlock": "首次检测到猿编程客户端打开时解锁"
   }
 ]

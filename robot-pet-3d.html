@@ -538,6 +538,7 @@
   .skin-chassis:hover, .skin-img:hover { filter: brightness(1.12); }
   /* 页内菜单里的皮肤选择（浏览器版；桌面版用系统原生菜单的「皮肤」子菜单） */
   .menu-skins { padding: 4px 12px 6px; }
+  .ms-dot.locked { opacity: .35; filter: grayscale(.7); cursor: help; }
   .ms-title { display: block; font-size: 10px; letter-spacing: 2px; color: #7d948b; margin-bottom: 6px; }
   .ms-grid { display: flex; gap: 7px; flex-wrap: wrap; }
   .ms-dot {
@@ -1664,7 +1665,8 @@
     samurai: { id: 'samurai',  name: '武士喵',     rarity: 'SSR', theme: '#6d7ff2', imgExt: '.jpg' },
     hotpot:  { id: 'hotpot',   name: '火锅喵',     rarity: 'UR',  theme: '#e6502e', imgExt: '.jpg' },
     deepsea: { id: 'deepsea',  name: '深海喵',     rarity: 'SR',  theme: '#2fd6b8', imgExt: '.jpg' },
-    ghost:   { id: 'ghost',    name: '夜光喵',     rarity: 'SSR', theme: '#b06cff', imgExt: '.jpg' }
+    ghost:   { id: 'ghost',    name: '夜光喵',     rarity: 'SSR', theme: '#b06cff', imgExt: '.jpg' },
+    ybc:     { id: 'ybc',      name: '猿编程喵',   rarity: '限定', theme: '#8b7cff', imgExt: '.jpg', locked: true }
   };
   var skinId = 'robot';
   var skinImg = document.getElementById('skinImg');
@@ -1717,6 +1719,16 @@
 
   // 页内菜单（浏览器版）的皮肤格子
   var msGrid = document.getElementById('msGrid');
+  window.__ybcUnlocked = false;    // 隐藏款「猿编程喵」：桌面版检测到猿编程后由主进程解锁
+  function refreshMsDots() {
+    if (!msGrid) return;
+    Array.prototype.forEach.call(msGrid.children, function (d) {
+      var s = SKINS[d.getAttribute('data-skin')];
+      var locked = s && s.locked && !window.__ybcUnlocked;
+      d.className = 'ms-dot' + (d.getAttribute('data-skin') === skinId ? ' sel' : '') + (locked ? ' locked' : '');
+      if (s && s.locked) d.title = (locked ? '🔒 ' : '') + s.name + ' · 隐藏款' + (locked ? '（桌面版打开猿编程解锁）' : '（已解锁）');
+    });
+  }
   if (msGrid) {
     Object.keys(SKINS).forEach(function (k) {
       var s = SKINS[k];
@@ -1727,18 +1739,32 @@
       d.style.setProperty('--c', s.theme);
       msGrid.appendChild(d);
     });
+    refreshMsDots();
     msGrid.addEventListener('click', function (e) {
       var d = e.target.closest('[data-skin]');
       if (!d) return;
-      var s = applySkin(d.getAttribute('data-skin'));
-      say(s.id === 'robot' ? '变回经典机器人啦。' : '换上「' + s.name + '」！这台小机箱也跟着换了配色。');
+      var id = d.getAttribute('data-skin');
+      var s = SKINS[id];
+      if (s && s.locked && !window.__ybcUnlocked) {
+        say('「猿编程喵」是隐藏款：桌面版打开猿编程写一次代码就会解锁。');
+        return;
+      }
+      var sk = applySkin(id);
+      say(sk.id === 'robot' ? '变回经典机器人啦。' : '换上「' + sk.name + '」！这台小机箱也跟着换了配色。');
     });
   }
 
   // 桌面版：主进程是唯一真源（设置里存的皮肤，启动和切换都会推过来）
   if (HOST && HOST.onSkin) {
     HOST.onSkin(function (id) { applySkin(id); });
-  } else {
+  }
+  if (HOST && HOST.onSkinUnlock) {
+    HOST.onSkinUnlock(function () {
+      window.__ybcUnlocked = true;
+      refreshMsDots();
+    });
+  }
+  if (!HOST) {
     var savedSkin = null;
     try { savedSkin = localStorage.getItem('pet.skin'); } catch (e) { /* ignore */ }
     applySkin(savedSkin || 'robot');
@@ -1750,9 +1776,7 @@
     menu.querySelector('[data-act="top"]').textContent = alwaysTop ? '取消置顶' : '窗口置顶';
     menu.querySelector('[data-act="tts"]').textContent = ttsOn ? '语音播报：开' : '语音播报：关';
     if (msGrid) {
-      Array.prototype.forEach.call(msGrid.children, function (d) {
-        d.className = 'ms-dot' + (d.getAttribute('data-skin') === skinId ? ' sel' : '');
-      });
+      refreshMsDots();
     }
   }
   function showMenu(x, y) {
