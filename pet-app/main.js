@@ -184,6 +184,12 @@ const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const RUN_VALUE = '3DDeskPet';
 
 function readAutoStart() {
+  // 优先用 Electron 自带 API：直接读 Run 键，不用起 reg 子进程（启动更快，
+  // 也避免在受限环境里被进程安全策略连坐）。读操作没有「值名冲突」问题，
+  // 那个坑只在写操作（applyAutoStart 继续手写 reg add/delete）。
+  try {
+    return app.getLoginItemSettings({ path: process.execPath }).openAtLogin === true;
+  } catch (err) { /* API 不可用才退回 reg */ }
   try {
     const out = execFileSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { encoding: 'utf8', windowsHide: true });
     return /\bREG_SZ\b/.test(out);
