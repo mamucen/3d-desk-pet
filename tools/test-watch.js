@@ -322,7 +322,7 @@ async function smokeMain() {
   ok(!!clean, '右键菜单里有「清理陪看报告」', clean && clean.label);
   ok(clean && clean.enabled && /4 份/.test(clean.label), '菜单上直接写着几份、多大', clean && clean.label);
   ok(clean && /\d+(\.\d+)?\s?(KB|MB|B)/.test(clean.label), '菜单上带着占用体积', clean && clean.label);
-  ok(r.calls.dialogs.length === 1 && /4 份/.test(r.calls.dialogs[0].message),
+  ok(r.calls.dialogs.length >= 1 && /4 份/.test(r.calls.dialogs[0].message),
     '点它会先弹确认框，说清楚有几份', r.calls.dialogs[0] && r.calls.dialogs[0].message);
   ok(r.calls.dialogs[0] && r.calls.dialogs[0].buttons.length === 3,
     '三个选择：留 3 份 / 全清 / 取消', r.calls.dialogs[0] && r.calls.dialogs[0].buttons.join(' / '));
@@ -342,6 +342,61 @@ async function smokeMain() {
     r.calls.shortcuts.join(','));
   ok(r.calls.lockCalls === 3 && r.calls.ipc.length > 0,
     '单实例锁被占着会重试（重启不会把桌宠弄丢）', '抢了 ' + r.calls.lockCalls + ' 次，最终起来了');
+
+  // 一键清空缓存（给小机器人降火）
+  const cache = r.calls.cacheItem;
+  ok(!!cache, '右键菜单里有「一键清空缓存」', cache && cache.label);
+  ok(cache && /可清|干净/.test(cache.label), '菜单上直接写着能清多少', cache && cache.label);
+  const topItem = r.calls.topItem;
+  ok(!!topItem && topItem.enabled, '右键菜单里有「看看谁在吃 CPU / 内存」', topItem && topItem.label);
+  const cacheDlg = (r.calls.dialogs || []).find((d) => /可以安全清掉/.test(d.message || ''));
+  ok(!!cacheDlg, '点它会先弹确认框，列出清什么、多大', cacheDlg && cacheDlg.message);
+  ok(cacheDlg && cacheDlg.buttons.join('/') === '开始清理/取消',
+    '两个选择：开始清理 / 取消', cacheDlg && cacheDlg.buttons.join(' / '));
+  const cr = r.calls.cacheResult || {};
+  ok(cr.sentGone === true, '已分析过的过期录像被清掉（腾空间）', JSON.stringify(cr));
+  ok(cr.pendKept === true, '还在等分析的录像原样留着（不能白看）', JSON.stringify(cr));
+  ok(cr.oldGone === true, '30 天前的临时文件被清掉', JSON.stringify(cr));
+  ok(cr.freshKept === true, '新的临时文件不动（可能正被占用）', JSON.stringify(cr));
+}
+
+/* ---------------- 8. 录到一半被关机/断电 ---------------- */
+async function testCrashSafety() {
+  console.log('\n[8] 录到一半被关机：标题不能丢、重启后要能补分析');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pet-crash-'));
+  let clock = 8000000;
+  const windows = [win('c1', '看到一半关机了_哔哩哔哩_bilibili', 40)];
+  const watcher = createWatcher({ capture: async () => windows, dir, now: () => clock, onEvent: () => {} });
+
+  await watcher.tick();                                  // 第一帧
+  const dirs = fs.readdirSync(dir).filter((n) => /^w[0-9a-z]+$/.test(n));
+  ok(dirs.length === 1, '开录就建了会话目录');
+  const metaFile = path.join(dir, dirs[0], 'session.json');
+  ok(fs.existsSync(metaFile), '录第一帧就把 session.json 落盘（以前只在收尾时写）');
+  let meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  ok(meta.title === '看到一半关机了', '标题已经落盘', meta.title);
+  ok(meta.recording === true, '标记为「还在录」', String(meta.recording));
+  ok(listPendingSessions(dir).length === 0, '正在录的场次不会被当成「看完了」提前发出去');
+
+  clock += 12000;
+  windows[0] = win('c1', '看到一半关机了_哔哩哔哩_bilibili', 150);
+  await watcher.tick();                                  // 第二帧
+  meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  ok(meta.frames.length === 2, '帧表逐帧更新', meta.frames.length + ' 帧');
+
+  // 这里模拟「啪一下关机」：不调 stop、不写字，进程直接没了。重启后：
+  const orphans = listPendingSessions(dir, { includeOrphans: true });
+  ok(orphans.length === 1, '重启后能认领这场孤儿录像', orphans.length + ' 场');
+  ok(orphans[0] && orphans[0].title === '看到一半关机了', '标题没丢（这就是逐帧落盘的意义）',
+    orphans[0] && orphans[0].title);
+  ok(orphans[0] && orphans[0].reason === 'orphan', '原因标成 orphan', orphans[0] && orphans[0].reason);
+  meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  ok(meta.recording === false && meta.endedAt > 0, '磁盘上的「还在录」标记也收尾了',
+    JSON.stringify({ recording: meta.recording, endedAt: meta.endedAt }));
+  ok(listPendingSessions(dir).length === 1, '收尾后正常进入待分析队列');
+
+  watcher.stop('manual');
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
 }
 
 (async () => {
@@ -350,6 +405,7 @@ async function smokeMain() {
   await testLightweight();
   await testPrune();
   await testPendingQueue();
+  await testCrashSafety();
   await testBridgeStatus();
   try {
     await smokeMain();

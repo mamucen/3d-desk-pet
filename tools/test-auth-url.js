@@ -38,7 +38,7 @@ function buildAuthFns(locationObj, publicConfig) {
 }
 
 const PUB = {
-  publishedUrl: 'https://your-app-id.app.workbuddy.host/?sharecode=YOUR_SHARECODE'
+  publishedUrl: 'https://info-keeper-21227.app.workbuddy.host/?sharecode=BRPXR3GO4G'
 };
 
 function testUrls() {
@@ -46,21 +46,21 @@ function testUrls() {
 
   // 场景 A：从中转站回来，地址上有 code/state/sharecode
   let f = buildAuthFns(
-    { origin: 'https://your-app-id.app.workbuddy.host', pathname: '/', search: '?code=abc&provider=wechat&sharecode=YOUR_SHARECODE&state=def' },
+    { origin: 'https://info-keeper-21227.app.workbuddy.host', pathname: '/', search: '?code=abc&provider=wechat&sharecode=BRPXR3GO4G&state=def' },
     PUB
   );
-  ok(f.shareCode() === 'YOUR_SHARECODE', 'A 能从回调地址里取到分享码', f.shareCode());
-  ok(f.cleanUrl() === '/?sharecode=YOUR_SHARECODE', 'A 登录后地址只留分享码（去掉 code/state）', f.cleanUrl());
-  ok(f.oauthRedirectTo() === 'https://your-app-id.app.workbuddy.host/?sharecode=YOUR_SHARECODE',
+  ok(f.shareCode() === 'BRPXR3GO4G', 'A 能从回调地址里取到分享码', f.shareCode());
+  ok(f.cleanUrl() === '/?sharecode=BRPXR3GO4G', 'A 登录后地址只留分享码（去掉 code/state）', f.cleanUrl());
+  ok(f.oauthRedirectTo() === 'https://info-keeper-21227.app.workbuddy.host/?sharecode=BRPXR3GO4G',
     'A 回调地址带 sharecode（关键修复）', f.oauthRedirectTo());
 
   // 场景 B：地址上暂时没有分享码（例如被手工清掉了），要从发布配置里补
   f = buildAuthFns(
-    { origin: 'https://your-app-id.app.workbuddy.host', pathname: '/', search: '' },
+    { origin: 'https://info-keeper-21227.app.workbuddy.host', pathname: '/', search: '' },
     PUB
   );
-  ok(f.shareCode() === 'YOUR_SHARECODE', 'B 地址没分享码时回退到发布配置', f.shareCode());
-  ok(f.oauthRedirectTo().indexOf('sharecode=YOUR_SHARECODE') > 0, 'B 回调地址照样带分享码', f.oauthRedirectTo());
+  ok(f.shareCode() === 'BRPXR3GO4G', 'B 地址没分享码时回退到发布配置', f.shareCode());
+  ok(f.oauthRedirectTo().indexOf('sharecode=BRPXR3GO4G') > 0, 'B 回调地址照样带分享码', f.oauthRedirectTo());
 
   // 场景 C：没有发布配置、地址也没有 → 退化为 origin（不抛异常）
   f = buildAuthFns({ origin: 'http://localhost:8099', pathname: '/', search: '' }, {});
@@ -101,8 +101,8 @@ async function testLanding() {
   page.on('pageerror', e => errs.push(String(e)));
 
   const cases = [
-    ['带 sharecode 的回调地址', `http://127.0.0.1:${PORT}/?code=bogus&provider=wechat&sharecode=YOUR_SHARECODE&state=bogus`],
-    ['普通打开', `http://127.0.0.1:${PORT}/?sharecode=YOUR_SHARECODE`]
+    ['带 sharecode 的回调地址', `http://127.0.0.1:${PORT}/?code=bogus&provider=wechat&sharecode=BRPXR3GO4G&state=bogus`],
+    ['普通打开', `http://127.0.0.1:${PORT}/?sharecode=BRPXR3GO4G`]
   ];
   for (const [label, url] of cases) {
     await page.goto(url, { waitUntil: 'load' });

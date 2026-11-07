@@ -20,7 +20,7 @@ const QN_H = 62;
 
 // 信息管家线上地址（含分享码）。平台的分享链接必须带 sharecode，
 // 少了会被判定「链接不完整」直接 403，所以这里一定要带全。
-const DEFAULT_APP_URL = 'https://your-app-id.app.workbuddy.host/?sharecode=YOUR_SHARECODE';
+const DEFAULT_APP_URL = 'https://info-keeper-21227.app.workbuddy.host/?sharecode=BRPXR3GO4G';
 const DEFAULT_SHARECODE = (/(?:^|[?&])sharecode=([^&#]+)/.exec(DEFAULT_APP_URL) || [])[1] || '';
 
 // 只认信息管家的正式地址：*.workbuddy.host / *.workbuddy.cn（含 app.workbuddy.host），
@@ -834,13 +834,238 @@ function reportCleanItem() {
   };
 }
 
+/* ---------- 一键清空缓存（给小机器人降火） ----------
+   变红的根源是 CPU/内存，能安全清掉的是「自己攒的垃圾」：
+   已分析过的录像、7 天前的 Windows 临时文件。
+   不碰：笔记、设置、皮肤、陪看报告，以及任何个人文件。 */
+
+function dirBytes(dir) {
+  let total = 0;
+  try {
+    for (const n of fs.readdirSync(dir)) {
+      const p = path.join(dir, n);
+      let st;
+      try { st = fs.statSync(p); } catch (e) { continue; }
+      if (st.isDirectory()) total += dirBytes(p);
+      else total += st.size;
+    }
+  } catch (e) { /* 读不动就算了 */ }
+  return total;
+}
+
+const TEMP_DAYS = 7;
+
+/** 临时文件根目录（测试时可用 PET_TEMP_DIR 指到沙箱，绝不碰真系统临时目录） */
+function tempRoot() {
+  const p = process.env.PET_TEMP_DIR;
+  return p && p.trim() ? p : os.tmpdir();
+}
+
+/** 陪看录像里哪些能删：已经分析过（session.sent.json）或只剩图的；
+ *  有 session.json 的说明还在等分析，绝对不能删（删了就白看了）。 */
+function watchCacheStats() {
+  const root = watchRoot();
+  let sessions = 0;
+  let bytes = 0;
+  let keep = 0;
+  try {
+    for (const n of fs.readdirSync(root)) {
+      if (!/^w[0-9a-z]+$/.test(n)) continue;
+      const p = path.join(root, n);
+      const pending = fs.existsSync(path.join(p, 'session.json'));
+      if (pending) { keep += 1; continue; }
+      sessions += 1;
+      bytes += dirBytes(p);
+    }
+  } catch (e) { /* 目录不存在 */ }
+  return { sessions, bytes, keep, root };
+}
+
+function tempCacheStats() {
+  const dir = tempRoot();
+  const cut = Date.now() - TEMP_DAYS * 86400000;
+  let count = 0;
+  let bytes = 0;
+  try {
+    for (const n of fs.readdirSync(dir)) {
+      const p = path.join(dir, n);
+      let st;
+      try { st = fs.statSync(p); } catch (e) { continue; }
+      if (st.mtimeMs > cut) continue;
+      count += 1;
+      bytes += st.isDirectory() ? dirBytes(p) : st.size;
+    }
+  } catch (e) { /* 忽略 */ }
+  return { count, bytes, dir };
+}
+
+/** 菜单项文案：直接写清能清多少，不用点开才知道 */
+function cacheCleanItem() {
+  const w = watchCacheStats();
+  const t = tempCacheStats();
+  const total = w.bytes + t.bytes;
+  const label = total > 1024
+    ? '一键清空缓存（可清 ' + fmtBytes(total) + '）'
+    : '一键清空缓存（已经很干净）';
+  return { label, click: () => { cleanCaches().catch(() => {}); } };
+}
+
+async function cleanCaches() {
+  const w = watchCacheStats();
+  const t = tempCacheStats();
+  if (!w.sessions && !t.count) {
+    petSay('缓存挺干净的，没什么可清。变红多半是别的程序在忙，右键看看「谁在吃 CPU」。');
+    return;
+  }
+  const s = lastSys || {};
+  const load = (typeof s.cpu === 'number') ? '现在 CPU ' + s.cpu + '%、内存 ' + s.mem + '%。' : '';
+  let choice = 1;
+  try {
+    const r = await dialog.showMessageBox({
+      type: 'question',
+      buttons: ['开始清理', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+      title: '一键清空缓存',
+      message: load + '可以安全清掉这些：',
+      detail: [
+        '· 过期的陪看录像：' + w.sessions + ' 场 · ' + fmtBytes(w.bytes) + '（已经分析过的）',
+        '· Windows 临时文件：' + t.count + ' 个 · ' + fmtBytes(t.bytes) + '（' + TEMP_DAYS + ' 天前的，正在用的会跳过）',
+        w.keep ? '' : '',
+        w.keep ? '· 还有 ' + w.keep + ' 场录像在等分析，这些会留着' : '',
+        '',
+        '不会动：笔记、设置、皮肤、陪看报告，以及任何个人文件。'
+      ].filter((x) => x !== '').join('\n')
+    });
+    choice = r && typeof r.response === 'number' ? r.response : 1;
+  } catch (e) {
+    return;
+  }
+  if (choice !== 0) return;
+
+  petSay('开始清…');
+  let freed = 0;
+  let failed = 0;
+
+  // 1) 过期录像
+  try {
+    for (const n of fs.readdirSync(w.root)) {
+      if (!/^w[0-9a-z]+$/.test(n)) continue;
+      const p = path.join(w.root, n);
+      if (fs.existsSync(path.join(p, 'session.json'))) continue;      // 等分析的不动
+      const before = dirBytes(p);
+      try { fs.rmSync(p, { recursive: true, force: true }); freed += before; }
+      catch (e) { failed += 1; }
+    }
+  } catch (e) { /* 忽略 */ }
+
+  // 2) 老临时文件（逐个删，占用中的跳过）
+  const cut = Date.now() - TEMP_DAYS * 86400000;
+  try {
+    for (const n of fs.readdirSync(t.dir)) {
+      const p = path.join(t.dir, n);
+      let st;
+      try { st = fs.statSync(p); } catch (e) { continue; }
+      if (st.mtimeMs > cut) continue;
+      const before = st.isDirectory() ? dirBytes(p) : st.size;
+      try { fs.rmSync(p, { recursive: true, force: true }); freed += before; }
+      catch (e) { failed += 1; }
+    }
+  } catch (e) { /* 忽略 */ }
+
+  refreshTrayTip();
+  if (tray) tray.setContextMenu(buildTrayMenu());
+  petSay(freed > 0
+    ? '清完了，腾出 ' + fmtBytes(freed) + (failed ? '（' + failed + ' 个正被占用，跳过了）' : '') + '。'
+    : '没清出空间来，这些文件可能正被别的程序用着。');
+}
+
+/* ---------- 谁在吃电脑（变红了看一眼就知道该关谁） ---------- */
+
+function execPowerShell(script, timeout) {
+  return new Promise((resolve) => {
+    let execFile;
+    try { execFile = require('child_process').execFile; } catch (e) { return resolve(''); }
+    const b64 = Buffer.from(script, 'utf16le').toString('base64');
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', b64],
+      { timeout: timeout || 8000, windowsHide: true },
+      (err, stdout) => resolve(err ? '' : String(stdout || '')));
+  });
+}
+
+async function topProcesses(limit) {
+  const n = limit || 6;
+  // 不用 WMI 性能计数器（某些机器 Win32_PerfFormattedData_PerfProc_Process 直接是「无效类」），
+  // 改成两次 Get-Process 的 CPU 时间差分：哪都能跑，0.8 秒出结果。
+  const script = [
+    '[Console]::OutputEncoding=[Text.Encoding]::UTF8',
+    '$cores=[Environment]::ProcessorCount',
+    '$a=@{}',
+    'Get-Process | Where-Object { $_.CPU -ne $null } | ForEach-Object { $a[$_.Id]=$_.CPU }',
+    'Start-Sleep -Milliseconds 800',
+    'Get-Process | Where-Object { $a.ContainsKey($_.Id) } | ForEach-Object {',
+    '  $d=$_.CPU - $a[$_.Id]',
+    '  if ($d -gt 0) { $_.ProcessName + "|" + [math]::Round($d/0.8/$cores*100) + "|" + [math]::Round($_.WorkingSet64/1MB) }',
+    '}'
+  ].join('\n');
+  const out = await execPowerShell(script, 9000);
+  const merged = new Map();
+  out.trim().split(/\r?\n/).forEach((l) => {
+    const p = l.trim().split('|');
+    if (p.length < 3) return;
+    const name = p[0];
+    const cpu = Number(p[1]) || 0;
+    const mb = Number(p[2]) || 0;
+    const cur = merged.get(name) || { name, cpu: 0, mb: 0 };
+    cur.cpu += cpu;
+    cur.mb += mb;
+    merged.set(name, cur);
+  });
+  return Array.from(merged.values()).sort((a, b) => b.cpu - a.cpu).slice(0, n);
+}
+
+async function showTopProcesses() {
+  const s = lastSys || {};
+  const load = (typeof s.cpu === 'number') ? '现在 CPU ' + s.cpu + '%、内存 ' + s.mem + '%。' : '';
+  const top = await topProcesses(6);
+  if (!top.length) {
+    petSay('拿不到进程列表，我直接帮你开任务管理器吧。');
+    try { require('child_process').spawn('taskmgr.exe', [], { detached: true, stdio: 'ignore' }).unref(); } catch (e) { /* 忽略 */ }
+    return;
+  }
+  const lines = top.map((p, i) => (i + 1) + '. ' + p.name + '　CPU ' + p.cpu + '%　内存 ' + p.mb + ' MB');
+  let r = null;
+  try {
+    r = await dialog.showMessageBox({
+      type: 'info',
+      buttons: ['打开任务管理器', '知道了'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      title: '谁在吃 CPU / 内存',
+      message: load + '最忙的几个：',
+      detail: lines.join('\n') + '\n\n想关谁就在任务管理器里结束它；不确定的就别动，系统进程关不得。'
+    });
+  } catch (e) {
+    return;
+  }
+  if (r && r.response === 0) {
+    try { require('child_process').spawn('taskmgr.exe', [], { detached: true, stdio: 'ignore' }).unref(); } catch (e) { /* 忽略 */ }
+  }
+}
+
 function onWatchEvent(ev, payload) {
   if (ev === 'start') {
     petSay('陪你看《' + payload.title + '》，看完我给你个说法。');
     refreshTrayTip();
   } else if (ev === 'end') {
     refreshTrayTip();
+    petSay('看完了《' + payload.title + '》，记了 ' + payload.frames.length + ' 帧，我整理一下出报告。');
     enqueueWatch(payload);
+  } else if (ev === 'discard') {
+    // 太短的场次不打扰用户，但日志里要留痕，排查“怎么没报告”时用得上
+    console.log('[watch] 场次太短不生成报告（' + (payload.frames ? payload.frames.length : 0) + ' 帧）：' + payload.title);
   }
 }
 
@@ -1094,6 +1319,13 @@ function startWatchLoop() {
     const adopted = adoptLegacySessions(watchRoot(), 3);
     if (adopted) console.log('[watch] 认领了 ' + adopted + ' 场旧录像，等管家上线补分析');
   } catch (e) { /* 忽略 */ }
+  // 还有一种：录到一半被关机/断电 —— 元数据是逐帧落盘的，这里把它们的 recording 收尾，
+  // 重启后照样能出报告（标题不会丢）
+  try {
+    const pending = listPendingSessions(watchRoot(), { includeOrphans: true });
+    const orphans = pending.filter((m) => m.reason === 'orphan');
+    if (orphans.length) console.log('[watch] 认领了 ' + orphans.length + ' 场「录到一半被关机」的录像，重启后补分析');
+  } catch (e) { /* 忽略 */ }
   try {
     watcher = createWatcher({
       // 两段式：不采样的拍子只要窗口名（thumbnailSize 0x0 = 不让系统生成任何位图）；
@@ -1157,6 +1389,9 @@ function buildTrayMenu() {
     watchReportItem(),
     latestReportItem(),
     reportCleanItem(),
+    { type: 'separator' },
+    cacheCleanItem(),
+    { label: '看看谁在吃 CPU / 内存', click: () => showTopProcesses().catch(() => {}) },
     { type: 'separator' },
     { label: '跟随鼠标（Ctrl+Alt+F）', type: 'checkbox', checked: state.follow,
       click: () => { if (win) win.webContents.send('pet:follow', !state.follow); } },
@@ -1254,6 +1489,8 @@ ipcMain.on('pet:host-cmd', (e, name) => {
   else if (name === 'status') openStatusPage();
   else if (name === 'latest') openLatestReport();
   else if (name === 'clean') cleanReports().catch(() => {});
+  else if (name === 'cache') cleanCaches().catch(() => {});
+  else if (name === 'top') showTopProcesses().catch(() => {});
   else if (name === 'restart') restartApp();
   else if (name === 'ask') openApp('ask');
 });
@@ -1281,6 +1518,9 @@ ipcMain.on('pet:menu', (e, st) => {
     watchReportItem(),
     latestReportItem(),
     reportCleanItem(),
+    { type: 'separator' },
+    cacheCleanItem(),
+    { label: '看看谁在吃 CPU / 内存', click: () => showTopProcesses().catch(() => {}) },
     { type: 'separator' },
     { label: '重启小机器人（Ctrl+Alt+R）', click: () => restartApp() },
     { label: '退出', click: () => send('quit') }

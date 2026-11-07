@@ -37,7 +37,7 @@ function serve(port) {
   page.on('pageerror', e => errs.push(String(e).slice(0, 120)));
   page.on('console', m => { if (m.type() === 'error') errs.push('[console] ' + m.text().slice(0, 120)); });
 
-  await page.goto(`http://127.0.0.1:${PORT}/?sharecode=YOUR_SHARECODE`, { waitUntil: 'networkidle2', timeout: 30000 });
+  await page.goto(`http://127.0.0.1:${PORT}/?sharecode=BRPXR3GO4G`, { waitUntil: 'networkidle2', timeout: 30000 });
   await new Promise(r => setTimeout(r, 2000));
 
   const info = await page.evaluate(() => {

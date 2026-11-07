@@ -161,6 +161,38 @@ function run(opts) {
     // 假装自己是“一键重启起来的新进程”，这样才能走到等锁重试那条路
     if (process.argv.indexOf('--relaunch') < 0) process.argv.push('--relaunch');
 
+    // 一键清空缓存：造两类录像（已发送的可删 / 等分析的不能删）+ 沙箱临时目录
+    // 临时目录指到沙箱，绝不碰真实的 %TEMP%
+    try {
+      const wdir = path.join(fakeDir, 'watch');
+      const sent = path.join(wdir, 'wsent01');
+      fs.mkdirSync(sent, { recursive: true });
+      fs.writeFileSync(path.join(sent, 'f001.jpg'), Buffer.alloc(4096, 1));
+      fs.writeFileSync(path.join(sent, 'session.sent.json'), JSON.stringify({ id: 'wsent01', title: '发过的视频', frames: [] }));
+      const pend = path.join(wdir, 'wpend01');
+      fs.mkdirSync(pend, { recursive: true });
+      fs.writeFileSync(path.join(pend, 'f001.jpg'), Buffer.alloc(2048, 2));
+      fs.writeFileSync(path.join(pend, 'f002.jpg'), Buffer.alloc(2048, 3));
+      fs.writeFileSync(path.join(pend, 'session.json'), JSON.stringify({ id: 'wpend01', title: '等分析的视频', frames: [{ i: 1, file: path.join(pend, 'f001.jpg'), at: 1 }, { i: 2, file: path.join(pend, 'f002.jpg'), at: 2 }] }));
+
+      const tdir = path.join(fakeDir, 'faketemp');
+      fs.mkdirSync(tdir, { recursive: true });
+      const oldT = path.join(tdir, 'old-junk.tmp');
+      fs.writeFileSync(oldT, Buffer.alloc(8192, 4));
+      const freshT = path.join(tdir, 'fresh.tmp');
+      fs.writeFileSync(freshT, Buffer.alloc(1024, 5));
+      const day = 86400000;
+      try {
+        fs.utimesSync(oldT, (Date.now() - 30 * day) / 1000, (Date.now() - 30 * day) / 1000);
+        const od = path.join(tdir, 'old-dir');
+        fs.mkdirSync(od, { recursive: true });
+        fs.writeFileSync(path.join(od, 'x.bin'), Buffer.alloc(4096, 6));
+        fs.utimesSync(od, (Date.now() - 40 * day) / 1000, (Date.now() - 40 * day) / 1000);
+      } catch (e) { /* 忽略 */ }
+      process.env.PET_TEMP_DIR = tdir;
+      calls.cacheSeeds = { sent, pend, oldT, freshT, tdir };
+    } catch (e) { /* 造不出来就跳过这块 */ }
+
     try {
       require(path.join(__dirname, '..', 'pet-app', 'main.js'));
     } catch (e) {
@@ -191,15 +223,35 @@ function run(opts) {
         const rs = tpl.find((i) => i && /重启/.test(i.label || ''));
         calls.restartItem = rs ? { label: rs.label, enabled: rs.enabled !== false } : null;
         if (rs && typeof rs.click === 'function') rs.click();
+
+        // 新加：一键清空缓存 + 看谁在吃 CPU
+        const cache = tpl.find((i) => i && /一键清空缓存/.test(i.label || ''));
+        calls.cacheItem = cache ? { label: cache.label, enabled: cache.enabled !== false } : null;
+        const top = tpl.find((i) => i && /谁在吃 CPU/.test(i.label || ''));
+        calls.topItem = top ? { label: top.label, enabled: top.enabled !== false } : null;
+        if (cache && typeof cache.click === 'function') cache.click();
       } catch (e) {
         calls.menuError = e.message;
       }
       // 清理报告是 async（要等确认框、再逐个丢回收站），给它一点时间跑完再收尾
       origTimeout(() => {
+        // 沙箱目录在收尾时会被整个删掉，所以「清完的结果」必须在这之前记下来
+        try {
+          const s = calls.cacheSeeds;
+          if (s) {
+            calls.cacheResult = {
+              sentGone: !fs.existsSync(s.sent),
+              pendKept: fs.existsSync(path.join(s.pend, 'session.json')),
+              oldGone: !fs.existsSync(s.oldT),
+              freshKept: fs.existsSync(s.freshT)
+            };
+          }
+        } catch (e) { calls.cacheResult = { error: e.message }; }
         delete process.env.PET_REPORT_ROOT;
         delete process.env.PET_BRIDGE_PORTS;
+        delete process.env.PET_TEMP_DIR;
         finish({ ok: true, calls });
-      }, 220);
+      }, 400);
     }, wait);
   });
 }

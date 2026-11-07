@@ -101,15 +101,20 @@ function createWatcher(options) {
     } catch (e) { /* 目录还不存在之类，忽略 */ }
   }
 
-  /** 会话收尾时把元数据落盘：进程被关掉、管家没开，下次也能补分析 */
+  /**
+   * 会话收尾时把元数据落盘：进程被关掉、管家没开，下次也能补分析。
+   * 注意：平时每存一帧也会调它（见 keepFrame）—— 这样突然关机/断电时，
+   * 至少标题和已录帧还在，重启后能接着出报告，而不是变成「没记下标题的旧视频」。
+   */
   function saveMeta(s) {
     try {
       const meta = {
         id: s.id,
         title: s.title,
         startedAt: s.startedAt,
-        endedAt: s.endedAt,
-        reason: s.reason,
+        endedAt: s.endedAt,          // 还在录时是 0
+        reason: s.reason || '',
+        recording: !!s.active,       // 还在录 → true：补发时不能把它当成“看完了”
         frames: s.frames.map((f) => ({ i: f.i, file: f.file, at: f.at }))
       };
       fs.writeFileSync(path.join(s.dir, 'session.json'), JSON.stringify(meta), 'utf8');
@@ -123,6 +128,7 @@ function createWatcher(options) {
     session = {
       id, dir, title, sourceId,
       startedAt: now(), endedAt: 0,
+      active: true,             // 正在录（写进 meta 的 recording 字段）
       frames: [],               // [{ i, file, at, ai: base64 }]
       interval
     };
@@ -157,6 +163,7 @@ function createWatcher(options) {
       session.frames.push({ i: n, file, at, ai });
       lastKeptAt = at;
       if (session.frames.length > MAX_FRAMES) thinOut();
+      saveMeta(session);                 // 每帧落一次标题/帧表：断电关机也不至于变成“无名录像”
       onEvent('frame', session);
     } catch (err) { /* 单帧失败不影响会话 */ }
   }
@@ -166,6 +173,7 @@ function createWatcher(options) {
     const s = session;
     s.endedAt = now();
     s.reason = reason;
+    s.active = false;
     session = null;
     interval = START_INTERVAL;
     lastFp = null;
@@ -249,8 +257,14 @@ function createWatcher(options) {
 
 /* ---------- 磁盘上的待分析会话（管家没开、程序被关都不会丢） ---------- */
 
-/** 列出还没送去分析的会话，按时间从早到晚 */
-function listPendingSessions(rootDir) {
+/**
+ * 列出还没送去分析的会话，按时间从早到晚。
+ * opts.includeOrphans：开机时传 true —— 把「正在录就被关机/断电」留下的场次认领成
+ * 已结束（reason='orphan'），否则它们的 recording=true 会永远被跳过。
+ * 平时补发一律不传，正在录的那一场绝不能被当成“看完了”提前送出去。
+ */
+function listPendingSessions(rootDir, opts) {
+  const includeOrphans = !!(opts && opts.includeOrphans);
   try {
     return fs.readdirSync(rootDir)
       .filter((n) => /^w[0-9a-z]+$/.test(n))
@@ -259,6 +273,15 @@ function listPendingSessions(rootDir) {
         try {
           const meta = JSON.parse(fs.readFileSync(file, 'utf8'));
           if (!meta || !Array.isArray(meta.frames) || meta.frames.length < 2) return null;
+          if (meta.recording) {
+            if (!includeOrphans) return null;              // 还在录，别抢跑
+            // 孤儿场次：进程被关掉了，按最后一帧时间收尾，并补写回磁盘
+            const last = meta.frames[meta.frames.length - 1];
+            meta.recording = false;
+            meta.endedAt = (last && last.at) || meta.endedAt || 0;
+            meta.reason = meta.reason || 'orphan';
+            try { fs.writeFileSync(file, JSON.stringify(meta), 'utf8'); } catch (e) { /* 忽略 */ }
+          }
           meta.dir = path.join(rootDir, n);
           return meta;
         } catch (e) { return null; }

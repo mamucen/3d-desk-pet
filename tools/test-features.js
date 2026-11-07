@@ -42,7 +42,7 @@ async function testBridge() {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      appUrl: 'https://your-app-id.app.workbuddy.host/?sharecode=X',
+      appUrl: 'https://info-keeper-21227.app.workbuddy.host/?sharecode=X',
       state: { todos: 3 },
       acked: [{ id: 'q1', ok: true }]
     })

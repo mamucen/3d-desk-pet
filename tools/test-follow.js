@@ -412,8 +412,8 @@ function runUrlCases() {
   const cases = [
     ['https://x/', ''],                                             // 之前缓存下来的占位地址
     ['https://info-keeper.example/?sharecode=demo', ''],            // 测试污染事件里的假域名
-    ['https://your-app-id.app.workbuddy.host/?sharecode=YOUR_SHARECODE',
-      'https://your-app-id.app.workbuddy.host/?sharecode=YOUR_SHARECODE'],
+    ['https://info-keeper-21227.app.workbuddy.host/?sharecode=BRPXR3GO4G',
+      'https://info-keeper-21227.app.workbuddy.host/?sharecode=BRPXR3GO4G'],
     ['http://localhost:8099/', 'http://localhost:8099/'],
     ['not a url', ''],
     ['', '']
