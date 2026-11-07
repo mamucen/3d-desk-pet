@@ -6,7 +6,6 @@ const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell, glo
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execFileSync } = require('child_process');
 const { createBridge } = require('./bridge');
 const { isFullscreenish } = require('./fullscreen');
 const { createOutbox } = require('./outbox');
@@ -213,17 +212,14 @@ const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const RUN_VALUE = '3DDeskPet';
 
 function readAutoStart() {
-  // 优先用 Electron 自带 API：直接读 Run 键，不用起 reg 子进程（启动更快，
-  // 也避免在受限环境里被进程安全策略连坐）。读操作没有「值名冲突」问题，
-  // 那个坑只在写操作（applyAutoStart 继续手写 reg add/delete）。
+  // 只用 Electron 自带 API（读 Run 键），绝不起 reg 子进程：
+  // 本机安全策略把 reg.exe 列在黑名单里，一旦启动会连坐杀掉整棵进程树，
+  // 之前「点开机自启就消失」就是这么来的。
   try {
-    return app.getLoginItemSettings({ path: process.execPath }).openAtLogin === true;
-  } catch (err) { /* API 不可用才退回 reg */ }
-  try {
-    const out = execFileSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { encoding: 'utf8', windowsHide: true });
-    return /\bREG_SZ\b/.test(out);
+    const st = app.getLoginItemSettings({ path: process.execPath });
+    return st.openAtLogin === true;
   } catch (err) {
-    return false;   // 值不存在时 reg 返回非 0 退出码
+    return false;
   }
 }
 
@@ -238,26 +234,18 @@ function loginItemTarget() {
 
 function applyAutoStart(on) {
   settings.autoStart = !!on;
-  let done = false;
+  // 全部走 Electron 原生接口：不启动 reg.exe（本机安全策略一旦看到 reg
+  // 就会杀掉整个应用），也就没有进程被连坐的风险。
+  // 代价：Run 键的值名由 Electron 用应用名生成（旧版本是 3DDeskPet），
+  // 升级后首次勾选会多一条同名项——但启动行为是一致的。
   try {
     const t = loginItemTarget();
-    if (settings.autoStart) {
-      // 路径一律加引号：便携版常被放在带空格的目录里
-      const cmd = ['"' + t.exe + '"'].concat(t.args.map((a) => '"' + a + '"')).join(' ');
-      execFileSync('reg', ['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', cmd, '/f'], { windowsHide: true });
-    } else {
-      try {
-        execFileSync('reg', ['delete', RUN_KEY, '/v', RUN_VALUE, '/f'], { windowsHide: true });
-      } catch (err) { /* 本来就没有这一项 */ }
-    }
-    done = true;
-  } catch (err) {
-    done = false;   // reg 被安全软件拦住时走兜底
-  }
-  if (!done) {
-    // 兜底：用 Electron 原生接口（注册表值名变成 electron.app.*，但至少能开机启动）
-    try { app.setLoginItemSettings({ openAtLogin: settings.autoStart }); } catch (err) { /* ignore */ }
-  }
+    app.setLoginItemSettings({
+      openAtLogin: settings.autoStart,
+      path: t.exe,
+      args: t.args
+    });
+  } catch (err) { /* 接口不可用就只在设置里记着 */ }
   saveSettings();
   try { if (tray) tray.setContextMenu(buildTrayMenu()); } catch (err) { /* ignore */ }
 }
