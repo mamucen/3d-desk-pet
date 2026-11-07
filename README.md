@@ -5,6 +5,19 @@
 
 > 纯本地运行：笔记数据存在你自己的云数据库，B 站接口全部匿名调用，不需要任何账号/密钥。
 
+## 直接下载（不想折腾代码就选这个）
+
+| 下载 | 大小 | 说明 |
+|------|------|------|
+| [**3D桌宠 便携版 v1.0.0**](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.0/3D-desk-pet-portable-v1.0.0.zip) | 110 MB | 免安装，解压后双击 `3D桌宠.exe` 即可运行（Windows x64） |
+| [源码包 v1.0.0](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.0/3d-desk-pet-source-v1.0.0.zip) | 1.2 MB | 完整源码，适合自己改 |
+| [源码（最新）](https://github.com/mamucen/3d-desk-pet/archive/refs/heads/main.zip) | — | GitHub 自动打包的当前 main 分支 |
+
+在线体验网页版：**https://mamucen.github.io/3d-desk-pet/**
+
+全部版本见 [Releases](https://github.com/mamucen/3d-desk-pet/releases)。
+
+
 ## 功能一览
 
 **桌面机器人（Electron）**
@@ -37,7 +50,7 @@
 ## 安装与运行
 
 ```bash
-git clone https://github.com/<你的用户名>/3d-desk-pet.git
+git clone https://github.com/mamucen/3d-desk-pet.git
 cd 3d-desk-pet/pet-app
 npm install
 npm start
