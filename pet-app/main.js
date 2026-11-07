@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell, glo
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { execFileSync } = require('child_process');
 const { createBridge } = require('./bridge');
 const { isFullscreenish } = require('./fullscreen');
 const { createOutbox } = require('./outbox');
@@ -162,10 +163,7 @@ function loadSettings() {
     }
   } catch (err) { /* 用默认值 */ }
   // 以系统里真实的登录项为准，避免两边不一致
-  try {
-    const real = app.getLoginItemSettings();
-    if (real && typeof real.openAtLogin === 'boolean') settings.autoStart = real.openAtLogin;
-  } catch (err) { /* ignore */ }
+  settings.autoStart = readAutoStart();
 }
 
 function saveSettings() {
@@ -174,18 +172,54 @@ function saveSettings() {
   } catch (err) { /* ignore */ }
 }
 
+/* 开机自启：自己写 HKCU 的 Run 项，不用 Electron 的 setLoginItemSettings。
+   原因：那个 API 用 app 名字当注册表值名，未打包时会变成 electron.app.Electron，
+   跟机器上别的 Electron 应用互相覆盖。这里的值名固定为 3DDeskPet。 */
+const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const RUN_VALUE = '3DDeskPet';
+
+function readAutoStart() {
+  try {
+    const out = execFileSync('reg', ['query', RUN_KEY, '/v', RUN_VALUE], { encoding: 'utf8', windowsHide: true });
+    return /\bREG_SZ\b/.test(out);
+  } catch (err) {
+    return false;   // 值不存在时 reg 返回非 0 退出码
+  }
+}
+
+function loginItemTarget() {
+  // 打包后 exe 自己就能启动；开发态（electron.exe 跑目录）要把应用目录带上，
+  // 否则开机会开一个空白 Electron。
+  return {
+    exe: process.execPath,
+    args: app.isPackaged ? [] : [path.resolve(__dirname, '..')],
+  };
+}
+
 function applyAutoStart(on) {
   settings.autoStart = !!on;
+  let done = false;
   try {
-    const opts = { openAtLogin: settings.autoStart };
-    if (!app.isPackaged) {
-      // 开发态（electron.exe 直接跑目录）要把应用目录带上，否则开机会开个空 Electron
-      opts.path = process.execPath;
-      opts.args = [path.resolve(__dirname, '..')];
+    const t = loginItemTarget();
+    if (settings.autoStart) {
+      // 路径一律加引号：便携版常被放在带空格的目录里
+      const cmd = ['"' + t.exe + '"'].concat(t.args.map((a) => '"' + a + '"')).join(' ');
+      execFileSync('reg', ['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', cmd, '/f'], { windowsHide: true });
+    } else {
+      try {
+        execFileSync('reg', ['delete', RUN_KEY, '/v', RUN_VALUE, '/f'], { windowsHide: true });
+      } catch (err) { /* 本来就没有这一项 */ }
     }
-    app.setLoginItemSettings(opts);
-  } catch (err) { /* ignore */ }
+    done = true;
+  } catch (err) {
+    done = false;   // reg 被安全软件拦住时走兜底
+  }
+  if (!done) {
+    // 兜底：用 Electron 原生接口（注册表值名变成 electron.app.*，但至少能开机启动）
+    try { app.setLoginItemSettings({ openAtLogin: settings.autoStart }); } catch (err) { /* ignore */ }
+  }
   saveSettings();
+  try { if (tray) tray.setContextMenu(buildTrayMenu()); } catch (err) { /* ignore */ }
 }
 
 /* ---------- 找到渲染页面 ---------- */
@@ -1411,8 +1445,8 @@ function buildTrayMenu() {
         saveSettings();
         if (!it.checked && fsHidden) setFsHidden(false);
       } },
-    { label: '开机自启', type: 'checkbox', checked: settings.autoStart,
-      click: (it) => { applyAutoStart(it.checked); if (tray) tray.setContextMenu(buildTrayMenu()); } },
+    { label: '开机自启（随 Windows 启动）', type: 'checkbox', checked: settings.autoStart,
+      click: (it) => { applyAutoStart(it.checked); } },
     { type: 'separator' },
     { label: '重启小机器人（Ctrl+Alt+R）', click: () => restartApp() },
     { label: '退出', click: () => { quitting = true; app.quit(); } }
@@ -1513,6 +1547,8 @@ ipcMain.on('pet:menu', (e, st) => {
     { label: '回到右下角', click: () => send('reset') },
     { label: '隐身（Ctrl+Alt+H）', click: () => toggleManualHide() },
     { label: '皮肤', submenu: skinSubmenu() },
+    { label: '开机自启（随 Windows 启动）', type: 'checkbox', checked: settings.autoStart,
+      click: (it) => { applyAutoStart(it.checked); } },
     { type: 'separator' },
     { label: '陪看模式（看 B 站时自动记录）', type: 'checkbox', checked: settings.watchMode, click: () => toggleWatch() },
     watchReportItem(),
@@ -1553,6 +1589,8 @@ function boot() {
     loadSettings();
     createWindow();
     createTray();
+    // 便携版被移动/改名后，注册表里的旧路径会失效；自启开着就重写一次，自愈
+    if (settings.autoStart) applyAutoStart(true);
     startCursorLoop();
     startSysLoop();
     startFullscreenWatch();

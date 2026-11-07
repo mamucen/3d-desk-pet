@@ -7,9 +7,12 @@ $dest    = Join-Path $outRoot '3D桌宠'
 Write-Host '==> 1/7 准备目录' -ForegroundColor Cyan
 if (-not (Test-Path $outRoot)) { New-Item -ItemType Directory -Path $outRoot -Force | Out-Null }
 if (Test-Path $dest) {
-    $bak = $dest + '.old-' + (Get-Date -Format 'HHmmss')
-    Rename-Item -LiteralPath $dest -NewName (Split-Path $bak -Leaf) -Force
-    Write-Host "    旧版本已重命名为 $(Split-Path $bak -Leaf)" -ForegroundColor DarkGray
+    Write-Host '    清空旧版本目录' -ForegroundColor DarkGray
+    $emptyTmp = Join-Path $env:TEMP ('wb-empty-' + (Get-Date -Format 'HHmmss'))
+    New-Item -ItemType Directory -Path $emptyTmp -Force | Out-Null
+    $null = robocopy $emptyTmp $dest /MIR /NFL /NDL /NJH /NJS /NP /R:0 /W:0
+    Remove-Item -LiteralPath $emptyTmp -Recurse -Force -ErrorAction SilentlyContinue
+    try { [System.IO.Directory]::Delete($dest, $true) } catch { }
 }
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
@@ -49,6 +52,12 @@ foreach ($item in @('robot-pet-3d.html','robot-pet.html','index.html','styles.cs
 Write-Host '==> 7/7 重命名主程序' -ForegroundColor Cyan
 $exe = Join-Path $dest 'electron.exe'
 if (Test-Path $exe) { Rename-Item $exe '3D桌宠.exe' -Force }
+
+$readme = Join-Path $src 'tools\portable-readme.txt'
+if (Test-Path $readme) {
+    Copy-Item $readme (Join-Path $dest '使用说明.txt') -Force
+    Write-Host '    已附带 使用说明.txt' -ForegroundColor DarkGray
+}
 
 $total = (Get-ChildItem $dest -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum)
 Write-Host ''
