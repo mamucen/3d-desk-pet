@@ -95,10 +95,13 @@ function run() {
   }
   process.stdout.write('\n');
 
-  // 本地已删除、远程还存在的文件 → 从 tree 中移除（sha: null）
+  // 默认不删除远程文件（避免本地缺少某文件时误删线上内容）
+  // 需要镜像式同步时才设置 GH_PRUNE=1
   const localSet = new Set(files.map((r) => r.split(path.sep).join('/')));
-  for (const p of remoteMap.keys()) {
-    if (!localSet.has(p)) { entries.push({ path: p, mode: '100644', type: 'blob', sha: null }); removed++; }
+  if (process.env.GH_PRUNE === '1') {
+    for (const p of remoteMap.keys()) {
+      if (!localSet.has(p)) { entries.push({ path: p, mode: '100644', type: 'blob', sha: null }); removed++; }
+    }
   }
 
   console.log(`    新增/修改 ${changed}，未变 ${unchanged}，删除 ${removed}`);
