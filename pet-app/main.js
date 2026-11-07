@@ -92,7 +92,7 @@ const state = { follow: false, top: true };
 let link = { online: false, state: null, appUrl: DEFAULT_APP_URL };
 let stateFile = '';
 let settingsFile = '';
-const settings = { autoStart: false, autoHide: true, watchMode: true, skin: 'robot', wander: false };
+const settings = { autoStart: false, autoHide: true, watchMode: true, skin: 'robot', wander: false, study: true };
 
 /* ---------- 皮肤 ---------- */
 const SKINS = [
@@ -164,6 +164,7 @@ function loadSettings() {
         if (typeof raw.watchMode === 'boolean') settings.watchMode = raw.watchMode;
         if (typeof raw.skin === 'string' && raw.skin) settings.skin = raw.skin;
         if (typeof raw.wander === 'boolean') settings.wander = raw.wander;
+        if (typeof raw.study === 'boolean') settings.study = raw.study;
       }
     }
   } catch (err) { /* 用默认值 */ }
@@ -702,6 +703,88 @@ function setWander(on) {
   saveSettings();
   if (win && !win.isDestroyed()) win.webContents.send('pet:wander', settings.wander);
   if (tray) tray.setContextMenu(buildTrayMenu());
+}
+
+/* ---------- 学习模式：检测到猿编程就自动变身 ----------
+   和游荡模式同一套只读窗口标题的机制（desktopCapturer，纯读取无副作用）。
+   看到猿编程窗口 → 换上「专注皮肤」说一句加油话；
+   猿编程窗口消失 → 还原用户之前选的皮肤。可右键关闭。 */
+const STUDY_KEYS = ['猿编程学生端', '学生端', 'AI IDE', 'ybc', 'YBC'];
+// 标题是磁盘路径（C:\...）的是文件夹窗口，不算「在用猿编程」，
+// 否则桌面常开的「猿编程课堂截图」之类的文件夹会一直触发学习模式
+const STUDY_PATH_TITLE = /^[A-Za-z]:[\\/]/;
+const STUDY_SKIN = 'deepsea';
+const STUDY_LINES_ENTER = [
+  '检测到猿编程，学习模式启动！我陪你一起写代码。',
+  '要开始写代码了吗？我变个专注的样子陪你。',
+  '学习模式上线！写累了记得看看我。',
+  '猿编程开着呢，我就在旁边，卡住了就喊我。'
+];
+const STUDY_LINES_EXIT = [
+  '猿编程关掉了，辛苦啦！换回原来的样子。',
+  '学习结束！休息一下吧，我陪你。',
+  '下课啦？记得让眼睛休息一会儿。'
+];
+let studyTimer = null;
+let studyActive = false;
+let studyPrevSkin = '';
+
+function setStudy(on) {
+  settings.study = !!on;
+  saveSettings();
+  if (!on && studyActive) {
+    studyActive = false;
+    applySkinChoice(studyPrevSkin || 'robot');   // 关掉开关时立刻还原
+  }
+  if (tray) tray.setContextMenu(buildTrayMenu());
+}
+
+function setStudyActive(on, quiet) {
+  if (on === studyActive) return;
+  studyActive = on;
+  if (on) {
+    studyPrevSkin = settings.skin || 'robot';
+    applySkinChoice(STUDY_SKIN);
+    if (!quiet && win && !win.isDestroyed()) {
+      petSay(STUDY_LINES_ENTER[Math.floor(Math.random() * STUDY_LINES_ENTER.length)]);
+    }
+  } else {
+    applySkinChoice(studyPrevSkin || 'robot');
+    if (!quiet && win && !win.isDestroyed()) {
+      petSay(STUDY_LINES_EXIT[Math.floor(Math.random() * STUDY_LINES_EXIT.length)]);
+    }
+  }
+}
+
+function startStudyLoop() {
+  if (studyTimer) return;
+  const dbg = !!process.env.PET_STUDY_LOG;
+  if (dbg) console.log('[study] 循环启动，每 15 秒检测一次');
+  studyTimer = setInterval(async () => {
+    try {
+      if (!settings.study) { setStudyActive(false, true); return; }
+      const sources = await desktopCapturer.getSources({
+        types: ['window'],
+        thumbnailSize: { width: 0, height: 0 },
+        fetchWindowIcons: false
+      });
+      let found = false;
+      for (const s of sources) {
+        const n = String(s.name || '');
+        if (!n || n.indexOf('小机器人') >= 0) continue;
+        if (STUDY_PATH_TITLE.test(n)) continue;       // 文件夹窗口不算
+        for (const k of STUDY_KEYS) {
+          if (n.indexOf(k) >= 0) { found = true; if (dbg) console.log('[study] 命中窗口: ' + n); break; }
+        }
+        if (found) break;
+      }
+      // 隐身时静默切换（不打招呼），现身时正常打招呼
+      setStudyActive(found, manualHidden || fsHidden);
+      if (dbg) console.log('[study] tick: found=' + found + ' active=' + studyActive + ' skin=' + settings.skin);
+    } catch (err) {
+      if (dbg) console.log('[study] 异常: ' + (err && err.message));
+    }
+  }, 15000);
 }
 
 /* ---------- 联动：状态缓存到本地，重启后先显示上次的数字 ---------- */
@@ -1588,6 +1671,8 @@ function buildTrayMenu() {
       click: (it) => { applyAutoStart(it.checked); } },
     { label: '游荡模式（在桌面上到处走走）', type: 'checkbox', checked: settings.wander,
       click: (it) => { setWander(it.checked); } },
+    { label: '学习模式（打开猿编程自动变身）', type: 'checkbox', checked: settings.study !== false,
+      click: (it) => { setStudy(it.checked); } },
     { type: 'separator' },
     { label: '重启小机器人（Ctrl+Alt+R）', click: () => restartApp() },
     { label: '退出', click: () => { quitting = true; app.quit(); } }
@@ -1702,6 +1787,8 @@ ipcMain.on('pet:menu', (e, st) => {
       click: (it) => { applyAutoStart(it.checked); } },
     { label: '游荡模式（在桌面上到处走走）', type: 'checkbox', checked: settings.wander,
       click: (it) => { setWander(it.checked); } },
+    { label: '学习模式（打开猿编程自动变身）', type: 'checkbox', checked: settings.study !== false,
+      click: (it) => { setStudy(it.checked); } },
     { type: 'separator' },
     { label: '陪看模式（看 B 站时自动记录）', type: 'checkbox', checked: settings.watchMode, click: () => toggleWatch() },
     watchReportItem(),
@@ -1746,6 +1833,7 @@ function boot() {
     if (settings.autoStart) applyAutoStart(true);
     startCursorLoop();
     startPeekLoop();
+    startStudyLoop();
     // 调试用：PET_WANDER=1 启动即进入游荡
     if (process.env.PET_WANDER) setTimeout(() => setWander(true), 1200);
     startSysLoop();
