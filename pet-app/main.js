@@ -6,13 +6,14 @@ const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell, glo
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { createBridge } = require('./bridge');
 const { isFullscreenish } = require('./fullscreen');
 const { createOutbox } = require('./outbox');
 const { createWatcher, cleanTitle, listPendingSessions, markSessionSent, dropSession, adoptLegacySessions, noteSessionAttempt, MAX_TRIES } = require('./watch');
 const { buildReport } = require('./report');
 const bili = require('./bili');
-const { APPS: INTERACT_APPS, SYSTEM_EVENTS, NEVER: INTERACT_NEVER } = require('./interact-apps');
+const { NEVER: INTERACT_NEVER, LINES: INTERACT_LINES, pick: INTERACT_PICK, isJunkLnk: INTERACT_JUNK } = require('./interact-apps');
 
 const WIN_W = 164;
 const WIN_H = 252;
@@ -94,8 +95,8 @@ let stateFile = '';
 let settingsFile = '';
 const settings = {
   autoStart: false, autoHide: true, watchMode: true, skin: 'robot', wander: false, study: true, ybcUnlocked: false,
-  // 互动应用：allow 里为 true 的应用才搭理；custom 是用户自己加的关键词
-  interact: { on: true, allow: { doubao: true }, custom: [], greetBack: true, bt: false }
+  // 互动应用：apps 里存每个应用的配置（出现打招呼 / 定时打开），manual 是手动添加的程序
+  interact: { on: true, apps: {}, manual: [], bt: false }
 };
 
 /* ---------- 皮肤 ---------- */
@@ -187,9 +188,8 @@ function loadSettings() {
         if (raw.interact && typeof raw.interact === 'object') {
           const it = raw.interact;
           if (typeof it.on === 'boolean') settings.interact.on = it.on;
-          if (it.allow && typeof it.allow === 'object') settings.interact.allow = it.allow;
-          if (Array.isArray(it.custom)) settings.interact.custom = it.custom.filter((c) => c && c.name);
-          if (typeof it.greetBack === 'boolean') settings.interact.greetBack = it.greetBack;
+          if (it.apps && typeof it.apps === 'object') settings.interact.apps = it.apps;
+          if (Array.isArray(it.manual)) settings.interact.manual = it.manual.filter((m) => m && m.path);
           if (typeof it.bt === 'boolean') settings.interact.bt = it.bt;
         }
       }
@@ -814,27 +814,147 @@ function startStudyLoop() {
   }, 15000);
 }
 
-/* ---------- 互动应用：可勾选的应用白名单 ----------
-   用户自己勾选「哪些应用出现时搭理我」，比如豆包悬浮窗、微信、网易云。
-   判断方式只有一种：desktopCapturer 读窗口标题（纯读取，不截图内容、不模拟按键）。
-   系统事件（蓝牙开关）靠只读的 Get-PnpDevice 状态探针，不改变任何系统设置。 */
-const INTERACT_COOLDOWN = 8 * 60 * 1000;   // 同一个应用 8 分钟内只打一次招呼
+/* ---------- 互动应用：真机应用清单 + 走过去帮你打开 ----------
+   应用列表全部来自本机扫描（开始菜单快捷方式 + 用户手动添加的程序），
+   不预置任何虚构应用。勾选之后：
+     · 出现时打招呼：只读窗口标题（desktopCapturer），纯读取
+     · 「打开」/「定时打开」：先走过去（窗口位移动画），再用 shell.openPath
+       启动用户自己选的快捷方式；定时任务跑在本进程内，不写系统计划任务。 */
+const INTERACT_COOLDOWN = 8 * 60 * 1000;   // 同一个应用 8 分钟内只招呼一次
 let interactTimer = null;
 let interactBtTimer = null;
 let interactWin = null;
 let interactPrev = new Set();
-const interactLastAt = {};
-let interactSnapshot = { ids: [], titles: [], at: 0 };
+const interactSeen = {};
+const schedLastDay = {};
+let installedCache = { at: 0, list: [] };
+let interactTitlesCache = [];
 let btState = null;
 
 function interactCfg() {
   if (!settings.interact || typeof settings.interact !== 'object') {
-    settings.interact = { on: true, allow: {}, custom: [], greetBack: true, bt: false };
+    settings.interact = { on: true, apps: {}, manual: [], bt: false };
   }
   const s = settings.interact;
-  if (!s.allow || typeof s.allow !== 'object') s.allow = {};
-  if (!Array.isArray(s.custom)) s.custom = [];
+  if (!s.apps || typeof s.apps !== 'object') s.apps = {};
+  if (!Array.isArray(s.manual)) s.manual = [];
+  if (typeof s.on !== 'boolean') s.on = true;
+  if (typeof s.bt !== 'boolean') s.bt = false;
   return s;
+}
+
+function appKey(p) {
+  return 'a' + crypto.createHash('md5').update(String(p)).digest('hex').slice(0, 10);
+}
+
+function startMenuRoots() {
+  const roots = [];
+  try {
+    roots.push(path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs'));
+  } catch (err) { /* ignore */ }
+  roots.push('C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs');
+  return roots;
+}
+
+function walkLnk(dir, out, depth) {
+  if (depth > 4) return;
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch (err) { return; }
+  for (const n of names) {
+    const p = path.join(dir, n);
+    let st;
+    try { st = fs.statSync(p); } catch (err) { continue; }
+    if (st.isDirectory()) { walkLnk(p, out, depth + 1); continue; }
+    if (!/\.lnk$/i.test(n)) continue;
+    const name = n.replace(/\.lnk$/i, '').trim();
+    if (!name) continue;
+    if (INTERACT_JUNK(name)) continue;
+    out.push({ name, path: p });
+  }
+}
+
+/** 本机真实安装的应用（扫描开始菜单，60 秒缓存） */
+function scanInstalledApps(force) {
+  if (!force && Date.now() - installedCache.at < 60000 && installedCache.list.length) {
+    return installedCache.list;
+  }
+  const raw = [];
+  for (const r of startMenuRoots()) walkLnk(r, raw, 0);
+  const seen = new Set();
+  const list = [];
+  for (const it of raw) {
+    const k = it.name.toLowerCase();
+    if (seen.has(k)) continue;                 // 同名只留第一条（用户目录优先）
+    seen.add(k);
+    list.push({ key: appKey(it.path), name: it.name, path: it.path, source: 'startmenu', manual: false, exeName: exeNameOf({ path: it.path }) });
+  }
+  list.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  installedCache = { at: Date.now(), list };
+  return list;
+}
+
+/* 解析 .lnk 的目标 exe（纯字节解析，不调 COM / 不起子进程），用于和进程名对上 */
+const lnkTargetCache = new Map();
+
+function lnkTargetPath(p) {
+  if (lnkTargetCache.has(p)) return lnkTargetCache.get(p);
+  let t = '';
+  try {
+    const b = fs.readFileSync(p);
+    if (b.length > 0x4C + 16 && b[0] === 0x4C) {
+      const localOff = b.readUInt32LE(0x4C + 12);
+      if (localOff > 0 && localOff + 4 < b.length) {
+        let end = localOff;
+        while (end < b.length && b[end] !== 0) end++;
+        const s = b.slice(localOff, end).toString('latin1');
+        if (/^[A-Za-z]:\\/.test(s)) t = s;
+      }
+    }
+    if (!t) {
+      const s = b.toString('latin1');
+      const m = s.match(/[A-Za-z]:\\[^\x00-\x1f]{3,}?\.(exe|lnk|bat)/i);
+      if (m) t = m[0];
+    }
+  } catch (err) { /* 读不到就当没有 */ }
+  lnkTargetCache.set(p, t);
+  return t;
+}
+
+function exeNameOf(app) {
+  let p = app.path || '';
+  if (/\.lnk$/i.test(p)) p = lnkTargetPath(p) || '';
+  const base = String(path.basename(p || '')).replace(/\.(exe|lnk|bat)$/i, '').toLowerCase();
+  return base;
+}
+
+/* 进程名清单：45 秒缓存。用途只是判断"这个应用在不在运行"，纯读取。 */
+const interactProc = { at: 0, names: new Set() };
+
+async function refreshProcNames() {
+  if (Date.now() - interactProc.at < 45000 && interactProc.names.size) return;
+  const out = await execPowerShell('[Console]::OutputEncoding=[Text.Encoding]::UTF8\nGet-Process | ForEach-Object { $_.ProcessName }', 9000);
+  const names = new Set();
+  String(out || '').split(/\r?\n/).forEach((l) => {
+    const n = l.trim().toLowerCase();
+    if (n) names.add(n);
+  });
+  if (names.size) {
+    interactProc.names = names;
+    interactProc.at = Date.now();
+    if (process.env.PET_INTERACT_LOG) console.log('[interact] 进程名缓存 ' + names.size + ' 个');
+  }
+}
+
+function allApps() {
+  const cfg = interactCfg();
+  const list = scanInstalledApps(false).slice();
+  const seenPath = new Set(list.map((a) => a.path));
+  for (const m of cfg.manual) {
+    if (!m || !m.path || seenPath.has(m.path)) continue;
+    seenPath.add(m.path);
+    list.push({ key: m.key, name: m.name, path: m.path, source: 'manual', manual: true, exeName: exeNameOf({ path: m.path }) });
+  }
+  return list;
 }
 
 async function interactTitles() {
@@ -854,104 +974,48 @@ async function interactTitles() {
   return out;
 }
 
-async function interactScan() {
-  const cfg = interactCfg();
-  const titles = await interactTitles();
-  const matched = new Set();     // 允许互动且当前存在
-  const running = new Set();     // 只是当前存在（用于面板展示）
-  const hit = {};
-  for (const app of INTERACT_APPS) {
-    let onScreen = false;
+function isRunning(app, titles) {
+  const n = String(app.name || '').toLowerCase().trim();
+  if (n) {
     for (const t of titles) {
-      if ((app.keys || []).some((k) => t.indexOf(k) >= 0)) { onScreen = true; hit[app.id] = t; break; }
-    }
-    if (!onScreen) continue;
-    running.add(app.id);
-    if (cfg.allow[app.id] === true) matched.add(app.id);
-  }
-  for (const cu of cfg.custom) {
-    const keys = ((cu.keys && cu.keys.length) ? cu.keys : [cu.name]).filter(Boolean);
-    for (const t of titles) {
-      if (keys.some((k) => t.indexOf(k) >= 0)) {
-        running.add('c:' + cu.id);
-        if (cu.on !== false) { matched.add('c:' + cu.id); hit['c:' + cu.id] = t; }
-        break;
-      }
+      if (String(t).toLowerCase().indexOf(n) >= 0) return true;
     }
   }
-  return { titles, matched, running, hit };
+  // 窗口标题认不出的（比如豆包只有悬浮球），拿 exe 名和进程名对一下
+  const exe = String(app.exeName || '').toLowerCase();
+  if (exe && interactProc.names.size) {
+    for (const p of interactProc.names) {
+      if (p === exe) return true;
+      if (p.length >= 4 && exe.length >= 4 && (p.indexOf(exe) === 0 || exe.indexOf(p) === 0)) return true;
+    }
+  }
+  return false;
 }
 
-function interactSay(lines) {
-  if (!lines || !lines.length) return;
-  if (!win || win.isDestroyed()) return;
-  petSay(lines[Math.floor(Math.random() * lines.length)]);
+function appState(app, titles) {
+  const c = interactCfg().apps[app.key] || {};
+  return {
+    key: app.key,
+    name: app.name,
+    path: app.path,
+    manual: !!app.manual,
+    allow: c.allow === true,
+    schedOn: c.schedOn === true,
+    time: c.time || '09:00',
+    running: isRunning(app, titles)
+  };
 }
 
-function interactReact(id, entering, quiet) {
+function buildInteractState(titles) {
+  const t = titles || interactTitlesCache || [];
   const cfg = interactCfg();
-  const key = id + (entering ? ':in' : ':out');
-  const now = Date.now();
-  if (interactLastAt[key] && now - interactLastAt[key] < INTERACT_COOLDOWN) return false;
-  interactLastAt[key] = now;
-  if (quiet) return true;                       // 隐身时不说话，但冷却照记
-  if (id.indexOf('c:') === 0) {
-    const cu = cfg.custom.find((c) => 'c:' + c.id === id);
-    if (!cu) return false;
-    petSay(entering ? (cu.line || ('「' + cu.name + '」打开了，我在旁边。')) : ('「' + cu.name + '」关掉了。'));
-    return true;
-  }
-  const app = INTERACT_APPS.find((a) => a.id === id);
-  if (!app) return false;
-  interactSay(entering ? app.lines : app.bye);
-  return true;
-}
-
-function interactTest(id) {
-  if (!id) return;
-  if (id === 'bt') {
-    const ev = SYSTEM_EVENTS.find((e) => e.id === 'bt');
-    if (ev) interactSay(btState === 'off' ? ev.linesOff : ev.linesOn);
-    return;
-  }
-  if (id.indexOf('c:') === 0) {
-    const cu = interactCfg().custom.find((c) => 'c:' + c.id === id);
-    petSay(cu ? ('「' + cu.name + '」打开了，我看着呢。') : '这个应用还没配置。');
-    return;
-  }
-  const app = INTERACT_APPS.find((a) => a.id === id);
-  if (app) interactSay(app.lines);
-}
-
-function buildInteractState() {
-  const cfg = interactCfg();
-  const seen = new Set(interactSnapshot.ids || []);
+  const apps = allApps().map((a) => appState(a, t));
   return {
     on: cfg.on !== false,
-    greetBack: cfg.greetBack !== false,
-    apps: INTERACT_APPS.map((a) => ({
-      id: a.id,
-      name: a.name,
-      emoji: a.emoji,
-      desc: a.desc || '',
-      allow: cfg.allow[a.id] === true,
-      running: seen.has(a.id)
-    })),
-    custom: cfg.custom.map((c) => ({
-      id: c.id,
-      name: c.name,
-      keys: c.keys || [],
-      on: c.on !== false,
-      running: seen.has('c:' + c.id)
-    })),
-    system: SYSTEM_EVENTS.map((e) => ({
-      id: e.id,
-      name: e.name,
-      emoji: e.emoji,
-      desc: e.desc || '',
-      allow: e.id === 'bt' ? !!cfg.bt : false,
-      state: e.id === 'bt' ? btState : null
-    }))
+    bt: !!cfg.bt,
+    total: apps.length,
+    running: apps.filter((a) => a.running).length,
+    apps
   };
 }
 
@@ -962,38 +1026,106 @@ function pushInteract() {
   if (tray) tray.setContextMenu(buildTrayMenu());
 }
 
+/* ---- 走过去 + 打开应用 ---- */
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+async function walkTo(tx, ty) {
+  if (!win || win.isDestroyed()) return null;
+  let b;
+  try { b = win.getBounds(); } catch (err) { return null; }
+  const from = { x: b.x, y: b.y };
+  const steps = 20;
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    try {
+      win.setPosition(Math.round(from.x + (tx - from.x) * e), Math.round(from.y + (ty - from.y) * e));
+    } catch (err) { /* ignore */ }
+    await sleep(26);
+  }
+  return from;
+}
+
+async function petOpenApp(key, reason) {
+  const cfg = interactCfg();
+  const c = cfg.apps[key];
+  if (!c || !c.path) return false;
+  const name = c.name || '它';
+  if (!win || win.isDestroyed()) return false;
+  let wa;
+  try { wa = screen.getPrimaryDisplay().workArea; } catch (err) { return false; }
+  let b;
+  try { b = win.getBounds(); } catch (err) { return false; }
+  const tx = Math.round(wa.x + wa.width * 0.5 - b.width / 2);
+  const ty = Math.round(wa.y + wa.height * 0.44 - b.height / 2);
+  petSay(INTERACT_PICK(reason === 'sched' ? INTERACT_LINES.sched : INTERACT_LINES.open, name));
+  const home = await walkTo(tx, ty);
+  await sleep(240);
+  let err = '';
+  try {
+    err = await shell.openPath(c.path);
+  } catch (e) {
+    err = String((e && e.message) || e);
+  }
+  await sleep(900);
+  if (home) await walkTo(home.x, home.y);
+  petSay(err ? ('没打开成功：' + err) : INTERACT_PICK(INTERACT_LINES.opened, name));
+  return !err;
+}
+
+function runSchedules() {
+  const cfg = interactCfg();
+  if (cfg.on === false) return;
+  const now = new Date();
+  const cur = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+  const day = now.toDateString();
+  for (const key of Object.keys(cfg.apps)) {
+    const c = cfg.apps[key];
+    if (!c || c.schedOn !== true) continue;
+    if (String(c.time || '') !== cur) continue;
+    if (schedLastDay[key] === day) continue;
+    schedLastDay[key] = day;
+    petOpenApp(key, 'sched').catch(() => {});
+  }
+}
+
 function startInteractLoop() {
   if (interactTimer) return;
   const dbg = !!process.env.PET_INTERACT_LOG;
-  if (dbg) console.log('[interact] 循环启动，每 12 秒读一次窗口标题');
+  if (dbg) console.log('[interact] 循环启动（12 秒一次）');
   interactTimer = setInterval(async () => {
-    let r;
-    try { r = await interactScan(); } catch (err) { return; }
+    let titles = [];
+    try { titles = await interactTitles(); } catch (err) { return; }
+    interactTitlesCache = titles;
+    refreshProcNames().catch(() => {});
     const cfg = interactCfg();
-    interactSnapshot = { ids: Array.from(r.running), titles: r.titles, at: Date.now() };
-    if (interactWin && !interactWin.isDestroyed()) interactWin.webContents.send('interact:state', buildInteractState());
-    if (cfg.on === false) { interactPrev = new Set(); return; }
-    const quiet = manualHidden || fsHidden;
-    for (const id of r.matched) {
-      if (!interactPrev.has(id)) {
-        interactReact(id, true, quiet);
-        if (dbg) console.log('[interact] 出现 ' + id + ' ← ' + (r.hit[id] || ''));
-      }
+    if (interactWin && !interactWin.isDestroyed()) {
+      interactWin.webContents.send('interact:state', buildInteractState(titles));
     }
-    if (cfg.greetBack !== false) {
-      for (const id of interactPrev) {
-        if (!r.matched.has(id)) {
-          interactReact(id, false, quiet);
-          if (dbg) console.log('[interact] 离开 ' + id);
-        }
+    if (cfg.on !== false) {
+      const quiet = manualHidden || fsHidden;
+      const onNow = new Set();
+      for (const app of scanInstalledApps(false)) {
+        const c = cfg.apps[app.key];
+        if (!c || c.allow !== true) continue;
+        if (!isRunning(app, titles)) continue;
+        onNow.add(app.key);
+        if (interactPrev.has(app.key)) continue;
+        const now = Date.now();
+        if (interactSeen[app.key] && now - interactSeen[app.key] < INTERACT_COOLDOWN) continue;
+        interactSeen[app.key] = now;
+        if (dbg) console.log('[interact] 出现 ' + app.name);
+        if (!quiet) petSay(INTERACT_PICK(INTERACT_LINES.appear, app.name));
       }
+      interactPrev = onNow;
+      runSchedules();
+    } else {
+      interactPrev = new Set();
     }
-    interactPrev = r.matched;
   }, 12000);
 }
 
-/* 蓝牙开关：只读 PnP 适配器状态（Get-PnpDevice 是查询，不改设置）。
-   不同机型上报方式不一样，读不到就保持 unknown，不瞎报。 */
+/* 蓝牙开关：只读 PnP 适配器状态（查询，不改设置）。读不到就保持 unknown，不瞎报。 */
 const BT_STATUS_SCRIPT = [
   '[Console]::OutputEncoding=[Text.Encoding]::UTF8',
   "$d = Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -like 'USB\\*' } | Select-Object -First 1",
@@ -1017,8 +1149,7 @@ function startBtLoop() {
     const changed = btState && st !== btState;
     btState = st;
     if (changed && cfg.on !== false && !(manualHidden || fsHidden)) {
-      const ev = SYSTEM_EVENTS.find((e) => e.id === 'bt');
-      if (ev) interactSay(st === 'on' ? ev.linesOn : ev.linesOff);
+      petSay(st === 'on' ? '蓝牙开了，耳机要连吗？' : '蓝牙关了，省电模式启动。');
     }
     if (changed && interactWin && !interactWin.isDestroyed()) {
       interactWin.webContents.send('interact:state', buildInteractState());
@@ -1035,17 +1166,16 @@ function openInteractPanel() {
     return;
   }
   interactWin = new BrowserWindow({
-    width: 640,
-    height: 780,
-    minWidth: 540,
-    minHeight: 520,
+    width: 720,
+    height: 800,
+    minWidth: 600,
+    minHeight: 560,
     frame: false,
     backgroundColor: '#121020',
     title: '互动应用',
     resizable: true,
     maximizable: false,
     fullscreenable: false,
-    skipTaskbar: false,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'interact-preload.js'),
@@ -1059,14 +1189,12 @@ function openInteractPanel() {
     if (!interactWin || interactWin.isDestroyed()) return;
     interactWin.show();
     interactWin.webContents.send('interact:state', buildInteractState());
-    // 打开面板时立刻扫一次，列表里马上能看到"正在运行"
-    interactScan().then((r) => {
-      interactSnapshot = { ids: Array.from(r.running), titles: r.titles, at: Date.now() };
-      if (interactWin && !interactWin.isDestroyed()) interactWin.webContents.send('interact:state', buildInteractState());
-    }).catch(() => {});
-    btProbe().then((st) => {
-      if (st !== 'unknown') btState = st;
-      if (interactWin && !interactWin.isDestroyed()) interactWin.webContents.send('interact:state', buildInteractState());
+    // 打开面板时立刻扫一次窗口标题，列表马上能看到"运行中"
+    interactTitles().then((t) => {
+      interactTitlesCache = t;
+      if (interactWin && !interactWin.isDestroyed()) {
+        interactWin.webContents.send('interact:state', buildInteractState(t));
+      }
     }).catch(() => {});
   });
   interactWin.on('closed', () => { interactWin = null; });
@@ -2020,9 +2148,8 @@ ipcMain.on('pet:quit', () => { quitting = true; app.quit(); });
 /* ---------- 互动应用面板 IPC ---------- */
 ipcMain.handle('interact:get', async () => {
   try {
-    const r = await interactScan();
-    interactSnapshot = { ids: Array.from(r.running), titles: r.titles, at: Date.now() };
-  } catch (err) { /* 用上一次的快照 */ }
+    interactTitlesCache = await interactTitles();
+  } catch (err) { /* 用上一次的标题快照 */ }
   return buildInteractState();
 });
 
@@ -2032,56 +2159,69 @@ ipcMain.on('interact:set-on', (e, v) => {
   pushInteract();
 });
 
+// 改单个应用：出现时打招呼 / 定时打开 / 时间
 ipcMain.on('interact:set-app', (e, p) => {
-  if (!p || !p.id) return;
+  if (!p || !p.key) return;
   const cfg = interactCfg();
-  const id = String(p.id);
-  const on = !!p.on;
-  if (id.indexOf('c:') === 0) {
-    const cu = cfg.custom.find((c) => 'c:' + c.id === id);
-    if (cu) cu.on = on;
-  } else if (id === 'bt') {
-    cfg.bt = on;
-    if (on) {
-      btProbe().then((st) => { if (st !== 'unknown') btState = st; pushInteract(); }).catch(() => {});
-    }
-  } else if (INTERACT_APPS.some((a) => a.id === id)) {
-    cfg.allow[id] = on;
+  const key = String(p.key);
+  let c = cfg.apps[key];
+  if (!c) {
+    const found = allApps().find((a) => a.key === key);
+    if (!found) return;
+    c = { key, name: found.name, path: found.path };
+    cfg.apps[key] = c;
   }
+  if (typeof p.allow === 'boolean') c.allow = p.allow;
+  if (typeof p.schedOn === 'boolean') c.schedOn = p.schedOn;
+  if (typeof p.time === 'string' && /^\d{1,2}:\d{2}$/.test(p.time)) c.time = p.time;
   saveSettings();
   pushInteract();
 });
 
-ipcMain.on('interact:test', (e, id) => { interactTest(String(id || '')); });
+// 「打开」：走过去 + 真正启动这个应用
+ipcMain.on('interact:open', (e, key) => {
+  petOpenApp(String(key || ''), 'manual').catch(() => {});
+});
 
-ipcMain.on('interact:add', (e, data) => {
+// 「试一下」：只演示打招呼
+ipcMain.on('interact:test', (e, key) => {
   const cfg = interactCfg();
-  const name = String((data && data.name) || '').trim().slice(0, 20);
-  if (!name) return;
-  const keys = (Array.isArray(data.keys) ? data.keys : [])
-    .map((k) => String(k || '').trim().slice(0, 30))
-    .filter(Boolean)
-    .slice(0, 5);
-  cfg.custom.push({
-    id: 'u' + Date.now().toString(36),
-    name,
-    keys: keys.length ? keys : [name],
-    on: true
-  });
-  saveSettings();
-  pushInteract();
+  const c = cfg.apps[String(key || '')];
+  if (c) petSay(INTERACT_PICK(INTERACT_LINES.appear, c.name));
 });
 
-ipcMain.on('interact:del', (e, id) => {
+// 「添加程序…」：用系统文件选择框挑一个 exe / lnk
+ipcMain.on('interact:add-exe', async (e) => {
+  try {
+    const r = await dialog.showOpenDialog(interactWin && !interactWin.isDestroyed() ? interactWin : undefined, {
+      title: '选择要加入的应用',
+      properties: ['openFile'],
+      filters: [{ name: '程序', extensions: ['exe', 'lnk', 'bat'] }]
+    });
+    if (r.canceled || !r.filePaths || !r.filePaths.length) return;
+    const p = r.filePaths[0];
+    const name = path.basename(p).replace(/\.(exe|lnk|bat)$/i, '');
+    const cfg = interactCfg();
+    const key = appKey(p);
+    if (!cfg.manual.some((m) => m.path === p)) {
+      cfg.manual.push({ key, name, path: p });
+    }
+    if (!cfg.apps[key]) cfg.apps[key] = { key, name, path: p, allow: false, schedOn: false, time: '09:00' };
+    saveSettings();
+    pushInteract();
+  } catch (err) { /* 用户取消 */ }
+});
+
+// 移除手动添加的程序（开始菜单扫描出来的删不掉，那是系统里的真应用）
+ipcMain.on('interact:del', (e, key) => {
   const cfg = interactCfg();
-  cfg.custom = cfg.custom.filter((c) => 'c:' + c.id !== String(id || ''));
+  const k = String(key || '');
+  cfg.manual = cfg.manual.filter((m) => m.key !== k);
+  delete cfg.apps[k];
   saveSettings();
   pushInteract();
 });
 
-ipcMain.on('interact:close', () => {
-  if (interactWin && !interactWin.isDestroyed()) interactWin.close();
-});
 
 /* ---------- 联动 IPC ---------- */
 ipcMain.on('pet:link-request', () => broadcastLink());
@@ -2200,6 +2340,18 @@ function boot() {
     // 调试用：PET_WANDER=1 启动即进入游荡；PET_OPEN_INTERACT=1 启动就打开互动面板
     if (process.env.PET_WANDER) setTimeout(() => setWander(true), 1200);
     if (process.env.PET_OPEN_INTERACT) setTimeout(() => openInteractPanel(), 1500);
+    // 调试用：PET_TEST_OPEN=应用名 → 启动后走过去打开它（验证“打开”动作）
+    if (process.env.PET_TEST_OPEN) {
+      setTimeout(() => {
+        const target = String(process.env.PET_TEST_OPEN);
+        const app = allApps().find((a) => a.name === target) || allApps().find((a) => a.name.indexOf(target) >= 0);
+        if (!app) { console.log('[interact] 没找到应用：' + target); return; }
+        const cfg = interactCfg();
+        if (!cfg.apps[app.key]) cfg.apps[app.key] = { key: app.key, name: app.name, path: app.path, allow: false, schedOn: false, time: '09:00' };
+        saveSettings();
+        petOpenApp(app.key, 'manual').then((ok) => console.log('[interact] 打开 ' + app.name + ' → ' + ok)).catch((e) => console.log('[interact] 打开失败 ' + e.message));
+      }, 4000);
+    }
     startSysLoop();
     startFullscreenWatch();
     startWatchLoop();
