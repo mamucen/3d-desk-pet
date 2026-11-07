@@ -1644,8 +1644,18 @@
     var on = s.id !== 'robot';
     pet.classList.toggle('skin-card', on);
     if (on) {
-      var src = 'pet-app/skins/' + s.id + (s.imgExt || '.png');
-      if (skinImg.getAttribute('src') !== src) skinImg.src = src;
+      var ext = s.imgExt || '.png';
+      // 开发版/网页版皮肤在 pet-app/skins/；便携版打包时 pet-app 被拍平，
+      // 皮肤在根下的 skins/。先试前者，加载失败自动退到后者。
+      var src = 'pet-app/skins/' + s.id + ext;
+      if (skinImg.getAttribute('src') !== src) {
+        skinImg.onerror = function () {
+          skinImg.onerror = null;
+          var alt = 'skins/' + s.id + ext;
+          if (skinImg.getAttribute('src') !== alt) skinImg.src = alt;
+        };
+        skinImg.src = src;
+      }
       skinName.textContent = s.name;
       skinRarity.textContent = s.rarity ? s.rarity + ' 级稀有度' : '';
     }
