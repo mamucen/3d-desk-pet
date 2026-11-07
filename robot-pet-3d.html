@@ -489,9 +489,19 @@
   .skin-img {
     position: absolute; left: 50%; bottom: 10px; height: 182px; width: auto;
     transform: translateX(-50%); display: none; cursor: pointer;
+    transform-origin: 50% 88%;          /* 绕脚底倾斜，像手办立在桌上 */
+    will-change: transform;             /* 悬浮/倾斜由 JS 主循环逐帧驱动 */
     border-radius: 10px;
     box-shadow: 0 0 0 1px rgba(255,255,255,.08), 0 12px 22px rgba(0,0,0,.5);
-    animation: bob 2.8s ease-in-out infinite;
+  }
+  /* 皮肤脚下的呼吸阴影：随悬浮高度缩放/变淡，主题色晕一圈 */
+  .skin-shadow {
+    position: absolute; left: 50%; bottom: 4px; width: 112px; height: 16px;
+    transform: translateX(-50%);
+    border-radius: 50%; pointer-events: none; display: none;
+    background:
+      radial-gradient(ellipse at center, color-mix(in srgb, var(--skin) 28%, transparent), transparent 62%),
+      radial-gradient(ellipse at center, rgba(10, 14, 13, .5), rgba(10, 14, 13, 0) 70%);
   }
   .skin-chassis {
     position: absolute; right: 5px; bottom: 16px; width: 54px;
@@ -522,6 +532,7 @@
     background: var(--skin); border-radius: 99px; padding: 1px 6px; letter-spacing: 0;
   }
   #pet.skin-card .skin-img, #pet.skin-card .skin-chassis, #pet.skin-card .skin-tag { display: block; }
+  #pet.skin-card .skin-shadow { display: block; }
   #pet.skin-card .skin-tag { display: flex; }
   #pet.skin-card .robot { display: none; }
   .skin-chassis:hover, .skin-img:hover { filter: brightness(1.12); }
@@ -555,6 +566,7 @@
           <div class="bob" id="bob"></div>
         </div>
       </div>
+      <div class="skin-shadow" id="skinShadow"></div>
       <img id="skinImg" class="skin-img" alt="皮肤" draggable="false" />
       <div class="skin-chassis" id="skinChassis" title="点我问管家">
         <div class="skc-top"><b>CPU</b><span class="skc-flag">HOT</span></div>
@@ -820,6 +832,35 @@
 
     body.style.transform =
       'translate3d(' + (cur.x * 1.6).toFixed(2) + 'px,8px,-3px) rotateY(' + (yaw * 0.12).toFixed(2) + 'deg)';
+
+    /* 皮肤立体展示：鼠标跟随倾斜 + 正弦悬浮 + 缓慢摇摆 + 脚下阴影呼吸。
+       与机器人共用 cur（鼠标目标）信号，像同一只手办的两种形态。 */
+    var skinCard = pet.classList.contains('skin-card');
+    if (skinCard !== skinCardOn) {
+      skinCardOn = skinCard;
+      if (!skinCard) {                      // 退回机器人：清内联样式，还原图层
+        skinImg.style.transform = '';
+        if (skinShadow) {
+          skinShadow.style.transform = '';
+          skinShadow.style.opacity = '';
+        }
+      }
+    }
+    if (skinCard) {
+      var st = now / 1000;
+      var floatY = Math.sin(st * 2.244) * 7;              // 2.8s 一个悬浮周期
+      var sway = Math.sin(st * 0.9) * 2.5;                // 缓慢左右慒摆
+      skinImg.style.transform =
+        'translateX(-50%) translate3d(0,' + floatY.toFixed(2) + 'px,14px)' +
+        ' rotateY(' + (cur.x * 26 + sway).toFixed(2) + 'deg)' +
+        ' rotateX(' + (-cur.y * 13).toFixed(2) + 'deg)';
+      if (skinShadow) {
+        var shrink = 1 - floatY * 0.012;                  // 升得越高影子越小越淡
+        skinShadow.style.transform =
+          'translateX(-50%) scale(' + shrink.toFixed(3) + ',' + (shrink * shrink).toFixed(3) + ')';
+        skinShadow.style.opacity = (0.9 - floatY * 0.02).toFixed(3);
+      }
+    }
 
     if (following && !dragging) stepFollow(now, dt);
     else if (wandering && !dragging) stepWander(now, dt);
@@ -1624,6 +1665,8 @@
   };
   var skinId = 'robot';
   var skinImg = document.getElementById('skinImg');
+  var skinShadow = document.getElementById('skinShadow');
+  var skinCardOn = false;            // 主循环里做边沿检测，退回机器人时清掉内联 transform
   var skinChassis = document.getElementById('skinChassis');
   var skinName = document.getElementById('skinName');
   var skinRarity = document.getElementById('skinRarity');
