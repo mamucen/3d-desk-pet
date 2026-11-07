@@ -9,8 +9,8 @@
 
 | 下载 | 大小 | 说明 |
 |------|------|------|
-| [**3D桌宠 便携版 v1.0.0**](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.0/3D-desk-pet-portable-v1.0.0.zip) | 110 MB | 免安装，解压后双击 `3D桌宠.exe` 即可运行（Windows x64） |
-| [源码包 v1.0.0](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.0/3d-desk-pet-source-v1.0.0.zip) | 1.2 MB | 完整源码，适合自己改 |
+| [**3D桌宠 便携版 v1.0.1**](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.1/3D-desk-pet-portable-v1.0.1.zip) | 110 MB | 免安装，解压后双击 `3D桌宠.exe` 即可运行（Windows x64） |
+| [源码包 v1.0.1](https://github.com/mamucen/3d-desk-pet/releases/download/v1.0.1/3d-desk-pet-source-v1.0.1.zip) | 1.2 MB | 完整源码，适合自己改 |
 | [源码（最新）](https://github.com/mamucen/3d-desk-pet/archive/refs/heads/main.zip) | — | GitHub 自动打包的当前 main 分支 |
 
 在线体验网页版：**https://mamucen.github.io/3d-desk-pet/**
