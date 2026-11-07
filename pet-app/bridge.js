@@ -29,6 +29,7 @@ function createBridge(options) {
   const ports = Array.isArray(opts.ports) && opts.ports.length ? opts.ports : defaultPorts();
   const onState = typeof opts.onState === 'function' ? opts.onState : () => {};
   const onWatch = typeof opts.onWatch === 'function' ? opts.onWatch : () => {};
+  let commandHandler = null;       // 外部程序指令（猿编程等）的接收方，由 main.js 注入
   let statusProvider = null;
 
   let server = null;
@@ -257,7 +258,45 @@ function createBridge(options) {
     if (pathname === '/poll') {
       return handlePoll(req, res);
     }
+
+    /* ---------- 外部程序接口（猿编程的 Python 代码用标准库就能调） ---------- */
+    if (pathname === '/pet/ping') {
+      return sendJson(res, 200, {
+        ok: true,
+        online: isOnline(),
+        sys: statusProvider ? statusProvider() : null
+      });
+    }
+    if ((pathname === '/pet/say' || pathname === '/pet/skin' || pathname === '/pet/act') && req.method === 'POST') {
+      return handlePetApi(pathname, req, res);
+    }
     return sendJson(res, 404, { ok: false });
+  }
+
+  function handlePetApi(pathname, req, res) {
+    let raw = '';
+    let tooLarge = false;
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > 16 * 1024) { tooLarge = true; req.destroy(); }
+    });
+    req.on('end', () => {
+      if (tooLarge) return;
+      let body;
+      try {
+        body = JSON.parse(raw || '{}');
+      } catch (err) {
+        return sendJson(res, 400, { ok: false, error: 'invalid json' });
+      }
+      const action = pathname === '/pet/say' ? 'say'
+        : pathname === '/pet/skin' ? 'skin' : 'act';
+      const cmd = { action, from: 'external' };
+      if (action === 'say') cmd.text = String((body && body.text) || '').slice(0, 200);
+      if (action === 'skin') cmd.id = String((body && body.id) || '');
+      if (action === 'act') cmd.act = String((body && body.action) || '');
+      if (commandHandler) commandHandler(cmd);
+      sendJson(res, 200, { ok: true });
+    });
   }
 
   function listen(index) {
@@ -292,6 +331,7 @@ function createBridge(options) {
       }
     },
     setStatusProvider: (fn) => { statusProvider = typeof fn === 'function' ? fn : null; },
+    setCommandHandler: (fn) => { commandHandler = typeof fn === 'function' ? fn : null; },
     stop() {
       for (const res of waiters) {
         try { res.destroy(); } catch (e) { /* ignore */ }

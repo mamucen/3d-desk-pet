@@ -48,6 +48,8 @@ foreach ($item in @('robot-pet-3d.html','robot-pet.html','index.html','styles.cs
         Write-Host "    跳过（不存在）: $item" -ForegroundColor DarkGray
     }
 }
+# copy root-level python examples (e.g. API demo for external IDEs)
+Get-ChildItem $src -Filter '*.py' | ForEach-Object { Copy-Item $_.FullName (Join-Path $appDir $_.Name) -Force }
 
 Write-Host '==> 7/7 重命名主程序' -ForegroundColor Cyan
 $exe = Join-Path $dest 'electron.exe'

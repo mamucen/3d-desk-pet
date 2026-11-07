@@ -341,6 +341,31 @@ function petSay(text) {
   if (win && !win.isDestroyed()) win.webContents.send('pet:say', String(text || ''));
 }
 
+/* ---------- 外部程序指令 ----------
+   猿编程的 Python 代码（或其他本机程序）通过桥接接口指挥桌宠：
+   POST /pet/say {"text":"..."} → 说话；POST /pet/skin {"id":"samurai"} → 换肤；
+   POST /pet/act {"action":"show|hide|follow"} → 现身/隐身/跟随开关。
+   只收白名单动作，全是可逆的展示类操作。 */
+function handlePetCommand(cmd) {
+  try {
+    if (!cmd || typeof cmd !== 'object') return;
+    if (cmd.action === 'say') {
+      petSay(cmd.text);
+    } else if (cmd.action === 'skin') {
+      applySkinChoice(cmd.id);
+    } else if (cmd.action === 'act') {
+      if (cmd.act === 'hide') {
+        if (win && !win.isDestroyed()) win.hide();
+      } else if (cmd.act === 'show') {
+        showWindow();
+      } else if (cmd.act === 'follow') {
+        state.follow = !state.follow;
+        if (win && !win.isDestroyed()) win.webContents.send('pet:follow', state.follow);
+      }
+    }
+  } catch (err) { /* 忽略 */ }
+}
+
 /* ---------- 快捷输入条 ----------
    Ctrl+Alt+Space 随手记一条；Ctrl+Alt+V 直接把剪贴板里的东西收进来。
    条子贴在机器人头顶，回车存档、Esc 走人。 */
@@ -1728,6 +1753,7 @@ function boot() {
     startWatchLoop();
 
     bridge = createBridge({ onState: handleLinkState, onWatch: handleWatchResult });
+    bridge.setCommandHandler(handlePetCommand);
     bridge.start().then((port) => {
       console.log('[bridge] listening on 127.0.0.1:' + (port || '(failed)'));
       flushOutbox();
